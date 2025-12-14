@@ -56,7 +56,7 @@ python convert_single_world.py <world_name>
 
 Example:
 ```bash
-python convert_single_world.py dcs_refresh
+python convert_single_world.py my_1.12_world
 ```
 
 ### Batch Conversion (All Worlds)
