@@ -1,0 +1,30 @@
+# Exclude world folders
+1-12 worlds/
+1-20 worlds/
+
+# Exclude archive folder
+archive/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary CSV files (per-world logs are in 1-20 worlds/logs/)
+*_extracted.csv
+*_converted.csv
+*_dx_only.csv
+
