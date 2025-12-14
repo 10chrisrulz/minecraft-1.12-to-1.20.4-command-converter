@@ -32,7 +32,7 @@ A modular Python script to convert Minecraft 1.12 commands to 1.20.4 syntax. Thi
 - `fill ~ ~ ~ ~ ~ ~ block` → `fill ~ ~ ~ ~ ~ ~ block` (with block conversion)
 - `tp @e[type=...] @a[c=1]` → `tp @e[type=minecraft:...] @a[limit=1,sort=nearest]`
 - `title @a times 1 3 1` → `title @a times 20 60 20` (seconds to ticks)
-- `particle reddust ~ ~ ~` → `particle reddust ~ ~ ~` (custom particles preserved)
+- `particle reddust ~ ~ ~ 0.5 0.5 0.5 1 0` → `particle minecraft:dust 0.5 0.5 0.5 1 ~ ~ ~ 0 0 0 1 0` (RGB mode preserved)
 - `kill @e[tag=...]` → `kill @e[tag=...]` (with selector conversion)
 - `say message` → `say message` (unchanged)
 - `clear @a item` → `clear @a item` (with selector conversion)
@@ -163,7 +163,7 @@ The script includes specific handlers for common commands:
 - `playsound` - Sound commands with sound name conversion
 - `tp` - Teleport with selector conversion
 - `title` - Title commands with tick conversion
-- `particle` - Particle commands with custom particle preservation
+- `particle` - Particle commands with special handling for reddust (RGB preservation) and block particles
 - `kill` - Kill command with selector conversion
 - `say` - Say command (unchanged)
 - `clear` - Clear command with selector and NBT conversion
@@ -183,7 +183,8 @@ The script includes specific handlers for common commands:
 | `blockdata ~ ~ ~ stone {CustomName:"Test"}` | `data modify block ~ ~ ~ stone merge value {CustomName:Test}` |
 | `tp @e[type=skeleton] @a[c=1]` | `tp @e[type=minecraft:skeleton] @a[limit=1,sort=nearest]` |
 | `title @a times 1 3 1` | `title @a times 20 60 20` |
-| `particle reddust ~ ~ ~` | `particle reddust ~ ~ ~` |
+| `particle reddust ~ ~ ~ 0.5 0.5 0.5 1 0` | `particle minecraft:dust 0.5 0.5 0.5 1 ~ ~ ~ 0 0 0 1 0` |
+| `particle reddust ~ ~ ~ 0.1 0.1 0.1 0.5 10` | `particle minecraft:dust 1 0 0 1 ~ ~ ~ 0.1 0.1 0.1 0.5 10` |
 | `entitydata @e[type=skeleton] {Health:20}` | `data modify entity @e[type=minecraft:skeleton] merge value {Health:20}` |
 | `@e[type=armor_stand,c=1]` | `@e[type=minecraft:armor_stand,limit=1,sort=nearest]` |
 | `playsound minecraft:block.anvil.break master @a` | `playsound block.anvil.break master @a` |
@@ -215,6 +216,49 @@ The converter preserves Minecraft color codes (§) in CSV files using UTF-8 enco
 | `§9` | Blue | `§9Blue Text` |
 | `§l` | Bold | `§lBold Text` |
 | `§r` | Reset | `§rReset Format` |
+
+## Particle Command Conversion
+
+The `particle` command has special conversion logic, particularly for `reddust` particles which were replaced with `minecraft:dust` in 1.13+.
+
+### Reddust to Dust Conversion
+
+**1.12 Format:**
+```
+particle reddust <x> <y> <z> <dx> <dy> <dz> <speed> [count] [mode] [targeter]
+```
+
+**1.20.4 Format:**
+```
+particle minecraft:dust <RGB_r> <RGB_g> <RGB_b> 1 <x> <y> <z> <spread_dx> <spread_dy> <spread_dz> <speed> <count> [mode] [targeter]
+```
+
+### RGB Functionality Preservation
+
+The converter intelligently preserves RGB color functionality based on the `count` parameter:
+
+- **When `count` is `0` (or omitted, defaults to `0`):**
+  - **RGB Mode**: The original `dx`, `dy`, `dz` values are used as RGB color components
+  - **Spread**: Set to `0 0 0` (no spread)
+  - **Example:**
+    - Input: `particle reddust ~ ~ ~ 0.5 0.5 0.5 1 0`
+    - Output: `particle minecraft:dust 0.5 0.5 0.5 1 ~ ~ ~ 0 0 0 1 0`
+    - The `0.5 0.5 0.5` values are preserved as RGB color (gray particles)
+
+- **When `count` is greater than `0`:**
+  - **RGB Mode**: Defaults to red (`1 0 0`)
+  - **Spread**: The original `dx`, `dy`, `dz` values become spread values
+  - **Example:**
+    - Input: `particle reddust ~ ~ ~ 0.1 0.1 0.1 0.5 10`
+    - Output: `particle minecraft:dust 1 0 0 1 ~ ~ ~ 0.1 0.1 0.1 0.5 10`
+    - The `0.1 0.1 0.1` values become spread, RGB defaults to red
+
+### Other Particle Conversions
+
+- **Block Particles**: `blockcrack` and `blockdust` particles are converted to `particle block <block_name>` with numeric block IDs converted to modern block names
+- **Standard Particles**: Other particles use the lookup table from `particle_conversion.csv`
+- **Speed Parameter**: Speed values are converted to absolute values (negative speeds become positive)
+- **Target Selectors**: Selectors in particle commands are converted to modern format
 
 ## Notes
 
