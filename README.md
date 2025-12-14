@@ -1,6 +1,6 @@
-# Minecraft 1.12 to 1.20 Command Converter
+# Minecraft 1.12 to 1.20.4 Command Converter
 
-A modular Python script to convert Minecraft 1.12 commands to 1.20 syntax. This tool uses lookup tables to accurately convert entity names, block IDs, and command parameters to their modern equivalents.
+A modular Python script to convert Minecraft 1.12 commands to 1.20.4 syntax. This tool uses lookup tables to accurately convert entity names, block IDs, and command parameters to their modern equivalents.
 
 ## Features
 
@@ -48,7 +48,26 @@ A modular Python script to convert Minecraft 1.12 commands to 1.20 syntax. This 
 
 ## Usage
 
-### Basic Usage
+### Single World Conversion
+
+```bash
+python convert_single_world.py <world_name>
+```
+
+Example:
+```bash
+python convert_single_world.py dcs_refresh
+```
+
+### Batch Conversion (All Worlds)
+
+```bash
+python batch_convert_worlds.py
+```
+
+This will process all worlds in the `1-12 worlds/` folder.
+
+### Basic Usage (Python API)
 
 ```python
 from command_converter import LookupTables, CommandConverter
@@ -64,38 +83,25 @@ print(converted)
 # Output: summon minecraft:end_crystal ~ ~ ~ {NoGravity:1b}
 ```
 
-### Process Test Commands
-
-```python
-from command_converter import process_test_commands
-
-# Process all commands from test_commands.csv
-process_test_commands(
-    input_file="test_commands.csv",
-    output_file="converted_commands.csv"
-)
-```
-
-### Run Converter
-
-```bash
-python command_converter.py
-```
-
 ## File Structure
 
 ```
 worldConverter/
-├── command_converter.py      # Main converter script
-├── entity_conversion.csv     # Entity name lookup table
-├── ID_Lookups.csv           # Block ID lookup table
-├── sound_conversion.csv     # Sound name lookup table
-├── test_commands.csv        # Input test commands
-├── converted_commands.csv   # Output converted commands
-├── verify_csv_encoding.py   # CSV encoding verification utility
-├── 1.12 sounds.txt          # 1.12 sound list (reference)
-├── 1.20 sounds.txt          # 1.20 sound list (reference)
-└── README.md                # Documentation
+├── command_converter.py          # Main converter script
+├── convert_single_world.py        # Single world conversion script
+├── batch_convert_worlds.py       # Batch conversion script
+├── extract_commands.py           # Extract commands from world files
+├── convert_extracted.py           # Convert extracted commands
+├── reimport_commands_simple.py   # Reimport converted commands
+├── extract_dx_only_selectors.py  # Extract dx-only selectors
+├── entity_conversion.csv         # Entity name lookup table
+├── ID_Lookups.csv                # Block ID lookup table
+├── sound_conversion.csv          # Sound name lookup table
+├── particle_conversion.csv        # Particle name lookup table
+├── COMMAND_CONVERSION_LOGIC.md   # Detailed conversion logic documentation
+├── LATEST_FIXES_SUMMARY.md       # Summary of recent fixes
+├── requirements.txt               # Python dependencies
+└── README.md                      # This file
 ```
 
 ## Lookup Tables
@@ -167,8 +173,8 @@ The script includes specific handlers for common commands:
 
 ## Example Conversions
 
-| Original (1.12) | Converted (1.20) |
-|-----------------|------------------|
+| Original (1.12) | Converted (1.20.4) |
+|-----------------|-------------------|
 | `summon ender_crystal ~ ~ ~` | `summon minecraft:end_crystal ~ ~ ~` |
 | `testfor @e[type=skeleton,r=100]` | `execute if entity @e[type=minecraft:skeleton,distance=..100]` |
 | `testforblock ~ ~ ~ chain_command_block -1 {SuccessCount:0}` | `execute if block ~ ~ ~ chain_command_block{SuccessCount:0}` |
@@ -186,21 +192,17 @@ The script includes specific handlers for common commands:
 ## Requirements
 
 - Python 3.6+
+- nbtlib (for NBT file parsing)
 - CSV files for lookup tables
-- No external dependencies
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
 
 ## Color Code Handling
 
-The converter preserves Minecraft color codes (§) in CSV files using UTF-8 encoding. To verify your CSV files are properly encoded:
-
-```bash
-python verify_csv_encoding.py your_file.csv
-```
-
-This utility will:
-- Test multiple encodings (UTF-8, CP1252, Latin-1, ISO-8859-1)
-- Show examples of color codes found in the file
-- Provide recommendations if encoding issues are detected
+The converter preserves Minecraft color codes (§) in CSV files using UTF-8 encoding.
 
 ### Color Code Examples
 
@@ -219,4 +221,5 @@ This utility will:
 - The script focuses on command syntax conversion, not world file parsing
 - NBT data conversion is context-aware (entity vs block vs item)
 - Unknown commands are processed by applying parameter conversions
-- The script handles malformed commands gracefully 
+- The script handles malformed commands gracefully
+- Some lookup tables may not be 100% complete
