@@ -1,7 +1,7 @@
-# Minecraft 1.12 to 1.20.4 Command Conversion Logic
+# Minecraft 1.12 to 1.21.10 Command Conversion Logic
 
 ## Overview
-This document details the conversion logic for each Minecraft command type when migrating from 1.12 to 1.20.4. The conversion system handles syntax changes, parameter ordering, NBT structure updates, and namespace requirements.
+This document details the conversion logic for each Minecraft command type when migrating from 1.12 to 1.21.10. The conversion system handles syntax changes, parameter ordering, NBT structure updates, namespace requirements, and 1.21.10-specific format changes (such as CustomName JSON format and equipment components).
 
 ---
 
@@ -266,6 +266,51 @@ Similar to blocks, items use a lookup table for name changes.
 ---
 
 ## NBT Data
+
+### CustomName (Entity Property)
+
+**1.12 Format:**
+```
+CustomName:"<text>"
+CustomName:"§c<text>"  (with color codes)
+```
+
+**1.21.10 Format:**
+```
+CustomName:{"text":"<text>"}
+CustomName:{"color":"red","text":"<text>"}  (with color codes)
+CustomName:[{...},{...}]  (multiple color components)
+```
+
+**Conversion Logic:**
+1. **Plain Text:** Convert to `{"text":"..."}` format
+2. **With Color Codes:** Parse color codes and convert to JSON text components
+   - Single color: `{"color":"red","text":"..."}`
+   - Multiple colors: Array of components `[{...},{...}]`
+3. **Special Characters:** JSON format prevents crashes from special characters in 1.21.10
+4. **Plugin Tags:** `minez.customName|` patterns are preserved (not converted)
+
+**Examples:**
+
+**Plain Text:**
+```
+1.12: CustomName:"Cryptkeeper"
+1.21.10: CustomName:{text:"Cryptkeeper"}
+```
+
+**With Color Code:**
+```
+1.12: CustomName:"§cGuardian"
+1.21.10: CustomName:{color:"red",italic:false,text:"Guardian"}
+```
+
+**Multiple Colors:**
+```
+1.12: CustomName:"§6Gold §cRed"
+1.21.10: CustomName:[{color:"gold",italic:false,text:"Gold "},{color:"red",italic:false,text:"Red"}]
+```
+
+**Note:** In 1.21.10, CustomName **must** be in JSON format to avoid crashes from special characters. Even plain text without color codes must be wrapped in JSON.
 
 ### Color Code Conversion
 **1.12:**
@@ -705,7 +750,8 @@ summon <entity> [x] [y] [z] [nbt]
    - ActiveEffects → active_effects
    - Fuse → fuse
    - Block/Data → BlockState:{Name:"..."}
-   - Color codes in CustomName
+   - CustomName to JSON format (required in 1.21.10)
+   - Color codes in CustomName converted to JSON text components
    - All other NBT conversions
 3. Handle Passengers array recursively (convert nested entity NBT)
 

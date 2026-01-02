@@ -1,13 +1,15 @@
-# Minecraft 1.12 to 1.20.4 Command Converter
+# Minecraft 1.12 to 1.21.10 Command Converter
 
-A modular Python script to convert Minecraft 1.12 commands to 1.20.4 syntax. This tool uses lookup tables to accurately convert entity names, block IDs, and command parameters to their modern equivalents.
+A modular Python script to convert Minecraft 1.12 commands to 1.21.10 syntax. This tool uses lookup tables to accurately convert entity names, block IDs, and command parameters to their modern equivalents, including 1.21.10-specific format requirements.
 
 ## Features
 
 - **Modular Design**: Each parameter type has its own conversion function
 - **Entity Name Conversion**: Uses `entity_conversion.csv` to convert old entity names to modern ones
 - **Block ID Conversion**: Uses `ID_Lookups.csv` to convert block IDs and data values to modern names
-- **Sound Name Conversion**: Uses `sound_conversion.csv` to convert 1.12 sound names to 1.20 equivalents
+- **Sound Name Conversion**: Uses `sound_conversion.csv` to convert 1.12 sound names to 1.21 equivalents
+- **CustomName JSON Format**: Converts CustomName to JSON format (required in 1.21.10 to prevent crashes)
+- **Equipment Components**: Converts ArmorItems/HandItems to 1.21.10 equipment structure with components
 - **Selector Conversion**: Converts target selectors to modern format (`@e[type=...]` → `@e[type=minecraft:...]`)
 - **Command Structure Updates**: Converts deprecated commands to modern equivalents
 - **NBT Data Handling**: Separate functions for entity, block, and item NBT data
@@ -123,7 +125,7 @@ id,data,block,raw_block,conversion name
 ```
 
 ### sound_conversion.csv
-Contains mappings from 1.12 sound names to 1.20 equivalents:
+Contains mappings from 1.12 sound names to 1.21 equivalents:
 ```csv
 1.12_sound,1.20_sound
 minecraft:block.anvil.break,block.anvil.break
@@ -173,7 +175,7 @@ The script includes specific handlers for common commands:
 
 ## Example Conversions
 
-| Original (1.12) | Converted (1.20.4) |
+| Original (1.12) | Converted (1.21.10) |
 |-----------------|-------------------|
 | `summon ender_crystal ~ ~ ~` | `summon minecraft:end_crystal ~ ~ ~` |
 | `testfor @e[type=skeleton,r=100]` | `execute if entity @e[type=minecraft:skeleton,distance=..100]` |
@@ -228,7 +230,7 @@ The `particle` command has special conversion logic, particularly for `reddust` 
 particle reddust <x> <y> <z> <dx> <dy> <dz> <speed> [count] [mode] [targeter]
 ```
 
-**1.20.4 Format:**
+**1.21.10 Format:**
 ```
 particle minecraft:dust <RGB_r> <RGB_g> <RGB_b> 1 <x> <y> <z> <spread_dx> <spread_dy> <spread_dz> <speed> <count> [mode] [targeter]
 ```

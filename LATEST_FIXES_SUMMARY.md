@@ -1,6 +1,6 @@
 # Latest Conversion Fixes Summary
 
-This document summarizes the eleven fixes applied in this session.
+This document summarizes the twelve fixes applied in this session.
 
 ---
 
@@ -696,6 +696,7 @@ Combined with earlier fixes, the converter now handles:
 16. ✅ Block lookup using 'block' column (fixes double_stone_slab2, etc.)
 17. ✅ CustomName color code conversion (fixed condition, minez.customName| protection)
 18. ✅ Enchantment conversion (numeric IDs to string names, ench: to Enchantments:)
+19. ✅ CustomName JSON format conversion (required in 1.21.10 to prevent crashes)
 
 The converter is now comprehensive and ready for production use!
 
