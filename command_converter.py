@@ -1,18 +1,47 @@
 import csv
 import re
 import shlex
+import logging
+import functools
 from typing import Dict, List, Tuple, Optional, Any
 from pathlib import Path
+
+# Set up method call logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('method_calls.log', mode='w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+method_logger = logging.getLogger('method_calls')
+
+def log_method_call(func):
+    """Decorator to log method calls"""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        class_name = args[0].__class__.__name__ if args else 'Unknown'
+        method_logger.info(f"CALLED: {class_name}.{func.__name__}")
+        try:
+            result = func(*args, **kwargs)
+            return result
+        except Exception as e:
+            method_logger.error(f"ERROR in {class_name}.{func.__name__}: {e}")
+            raise
+    return wrapper
 
 class LookupTables:
     """Manages all lookup tables for conversions"""
     
-    def __init__(self, entity_csv: str = "entity_conversion.csv", id_csv: str = "ID_Lookups.csv", sound_csv: str = "sound_conversion.csv", particle_csv: str = "particle_conversion.csv", silent: bool = True):
+    def __init__(self, entity_csv: str = "entity_conversion.csv", id_csv: str = "ID_Lookups.csv", sound_csv: str = "sound_conversion.csv", particle_csv: str = "particle_conversion.csv", legacy_json: str = "legacy.json", silent: bool = True):
         self.silent = silent
         self.entity_conversions = self._load_entity_conversions(entity_csv)
         self.block_conversions = self._load_block_conversions(id_csv)
         self.sound_conversions = self._load_sound_conversions(sound_csv)
         self.particle_conversions = self._load_particle_conversions(particle_csv)
+        self.legacy_blocks = self._load_legacy_json(legacy_json)
+        self.block_name_to_id = self._build_block_name_to_id_map(id_csv)
         
     def _load_entity_conversions(self, csv_path: str) -> Dict[str, str]:
         """Load entity name conversions from CSV"""
@@ -35,32 +64,44 @@ class LookupTables:
         """Load block ID/name conversions from CSV"""
         conversions = {}
         try:
-            with open(csv_path, 'r', encoding='utf-8', errors='replace') as file:
+            import os
+            # Get the directory of this script
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            csv_full_path = os.path.join(script_dir, csv_path)
+            
+            with open(csv_full_path, 'r', encoding='utf-8', errors='replace') as file:
                 reader = csv.DictReader(file)
+                row_count = 0
                 for row in reader:
+                    row_count += 1
                     try:
-                        block_id = row['id']
-                        data_value = int(row['data'])
-                        conversion_name = row['conversion name']
+                        block_id = row['id'].strip()
+                        data_value = int(row['data'].strip())
+                        conversion_name = row['conversion name'].strip()
+                        block_name = row['block'].strip()
+                        raw_block_name = row['raw_block'].strip()
                         
                         # Store by ID + data
                         conversions[(block_id, data_value)] = conversion_name
                         # Store by raw block name + data
-                        conversions[(row['raw_block'], data_value)] = conversion_name
+                        conversions[(raw_block_name, data_value)] = conversion_name
                         # Store by minecraft: prefixed name + data
-                        conversions[(f"minecraft:{row['raw_block']}", data_value)] = conversion_name
+                        conversions[(f"minecraft:{raw_block_name}", data_value)] = conversion_name
                         # Store by block column name + data (this is the actual command block name)
-                        conversions[(row['block'], data_value)] = conversion_name
+                        conversions[(block_name, data_value)] = conversion_name
                         # Store by minecraft: prefixed block name + data
-                        conversions[(f"minecraft:{row['block']}", data_value)] = conversion_name
+                        conversions[(f"minecraft:{block_name}", data_value)] = conversion_name
                     except (ValueError, KeyError) as e:
                         if not self.silent:
-                            print(f"Skipping malformed row: {row}. Error: {e}")
+                            print(f"Skipping malformed row {row_count}: {row}. Error: {e}", file=sys.stderr)
             if not self.silent:
-                print(f"Loaded {len(conversions)} block conversions")
+                print(f"Loaded {len(conversions)} block conversions from {row_count} rows", file=sys.stderr)
         except Exception as e:
+            import sys
+            import traceback
             if not self.silent:
-                print(f"Error loading block conversions: {e}")
+                print(f"Error loading block conversions from {csv_path}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
         return conversions
     
     def _load_sound_conversions(self, csv_path: str) -> Dict[str, str]:
@@ -96,6 +137,64 @@ class LookupTables:
             if not self.silent:
                 print(f"Error loading particle conversions: {e}")
         return conversions
+    
+    def _load_legacy_json(self, json_path: str) -> Dict[str, str]:
+        """Load legacy block ID:data to new block name mappings from JSON"""
+        import json
+        import os
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            json_full_path = os.path.join(script_dir, json_path)
+            
+            with open(json_full_path, 'r', encoding='utf-8', errors='replace') as file:
+                data = json.load(file)
+                blocks = data.get('blocks', {})
+            if not self.silent:
+                print(f"Loaded {len(blocks)} legacy block mappings")
+            return blocks
+        except Exception as e:
+            if not self.silent:
+                print(f"Error loading legacy JSON: {e}")
+            return {}
+    
+    def _build_block_name_to_id_map(self, csv_path: str) -> Dict[str, str]:
+        """Build a reverse lookup map from block name to block ID"""
+        name_to_id = {}
+        try:
+            import os
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            csv_full_path = os.path.join(script_dir, csv_path)
+            
+            with open(csv_full_path, 'r', encoding='utf-8', errors='replace') as file:
+                reader = csv.DictReader(file)
+                for row in reader:
+                    try:
+                        block_id = row['id'].strip()
+                        block_name = row['block'].strip()
+                        raw_block_name = row['raw_block'].strip()
+                        
+                        # Map block name to ID (use first occurrence, but prefer block column over raw_block)
+                        if block_name:
+                            block_name_lower = block_name.lower()
+                            if block_name_lower not in name_to_id:
+                                name_to_id[block_name_lower] = block_id
+                            # Also store without minecraft: prefix if present
+                            if block_name_lower.startswith('minecraft:'):
+                                name_to_id[block_name_lower[10:]] = block_id
+                        
+                        if raw_block_name:
+                            raw_block_name_lower = raw_block_name.lower()
+                            if raw_block_name_lower not in name_to_id:
+                                name_to_id[raw_block_name_lower] = block_id
+                            # Also store without minecraft: prefix if present
+                            if raw_block_name_lower.startswith('minecraft:'):
+                                name_to_id[raw_block_name_lower[10:]] = block_id
+                    except (ValueError, KeyError):
+                        continue
+        except Exception as e:
+            if not self.silent:
+                print(f"Error building block name to ID map: {e}")
+        return name_to_id
 
 class ParameterConverters:
     """Individual parameter conversion functions"""
@@ -116,7 +215,156 @@ class ParameterConverters:
         self.nbt_registry.register('HandDropChances', self._convert_hand_drop_chances_component)
         # CustomName converter (must be JSON format in 1.21.10)
         self.nbt_registry.register('CustomName', self._convert_custom_name_nbt)
+        # Inventory converter (processes items in Inventory arrays)
+        try:
+            self.nbt_registry.register('Inventory', self._convert_inventory_array)
+            import sys
+            print(f"DEBUG: Successfully registered Inventory converter", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"DEBUG: ERROR registering Inventory converter: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         
+        # SelectedItem converter (processes single item, similar to Inventory)
+        try:
+            self.nbt_registry.register('SelectedItem', self._convert_selected_item)
+            import sys
+            print(f"DEBUG: Successfully registered SelectedItem converter", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"DEBUG: ERROR registering SelectedItem converter: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        
+        # Debug: Verify registration
+        import sys
+        print(f"DEBUG ParameterConverters._register_nbt_converters: Registered = {list(self.nbt_registry.converters.keys())}", file=sys.stderr)
+        
+    def _convert_inventory_array(self, nbt_dict: Dict[str, Any], context: str = "entity") -> Dict[str, Any]:
+        """Convert Inventory array - processes each item in the array to component format"""
+        # Debug: Check if Inventory exists
+        if 'Inventory' not in nbt_dict:
+            return nbt_dict
+        
+        inventory = nbt_dict.get('Inventory')
+        if isinstance(inventory, list):
+            converted_inventory = []
+            for item in inventory:
+                if isinstance(item, dict):
+                    # Debug: Print item structure
+                    import sys
+                    print(f"DEBUG _convert_inventory_array: item keys = {list(item.keys())}", file=sys.stderr)
+                    if 'tag' in item:
+                        print(f"DEBUG: item['tag'] type = {type(item['tag'])}, value = {item.get('tag')}", file=sys.stderr)
+                    
+                    # Convert item using the same logic as equipment items
+                    # This should convert display:{Name:...,Lore:...} to components:{minecraft:custom_name:...,minecraft:lore:...}
+                    # IMPORTANT: The item dict should have 'id' and 'tag' keys from the parsed NBT
+                    # If it doesn't, something went wrong with parsing
+                    print(f"DEBUG _convert_inventory_array: Processing item = {item}", file=sys.stderr)
+                    converted_item = self._convert_item_dict_to_121_format(item)
+                    if converted_item:
+                        print(f"DEBUG: converted_item = {converted_item}", file=sys.stderr)
+                        # Ensure components are present and tag is removed
+                        if 'components' in converted_item and converted_item['components']:
+                            # Flatten lore arrays for entity NBT (Inventory/SelectedItem always use flat arrays)
+                            if 'minecraft:lore' in converted_item['components']:
+                                lore = converted_item['components']['minecraft:lore']
+                                if isinstance(lore, list):
+                                    # Flatten nested arrays: [[{...}],[{...}]] -> [{...},{...}]
+                                    flattened_lore = []
+                                    for lore_entry in lore:
+                                        if isinstance(lore_entry, list):
+                                            # If it's a nested array, extract the components
+                                            flattened_lore.extend(lore_entry)
+                                        else:
+                                            # If it's already a single object, add it
+                                            flattened_lore.append(lore_entry)
+                                    converted_item['components']['minecraft:lore'] = flattened_lore
+                            
+                            # Remove tag field if present (components replace tag)
+                            if 'tag' in converted_item:
+                                del converted_item['tag']
+                            # Also remove any remaining display or other old fields
+                            if 'display' in converted_item:
+                                del converted_item['display']
+                            # Preserve other fields like id, count, Slot from the ORIGINAL item
+                            # This is critical - the converted_item might not have id if it wasn't in the item_dict
+                            for key in ['id', 'count', 'Slot']:
+                                if key in item and key not in converted_item:
+                                    converted_item[key] = item[key]
+                            print(f"DEBUG: Final converted_item after preserving keys = {converted_item}", file=sys.stderr)
+                        else:
+                            # No components were created - this shouldn't happen if display was found
+                            print(f"DEBUG WARNING: No components in converted_item! item = {item}", file=sys.stderr)
+                        converted_inventory.append(converted_item)
+                    else:
+                        print(f"DEBUG: _convert_item_dict_to_121_format returned None", file=sys.stderr)
+                        # Conversion failed - this shouldn't happen, but keep original
+                        converted_inventory.append(item)
+                else:
+                    converted_inventory.append(item)  # Keep non-dict items as-is
+            nbt_dict['Inventory'] = converted_inventory
+        
+        return nbt_dict
+    
+    def _convert_selected_item(self, nbt_dict: Dict[str, Any], context: str = "entity") -> Dict[str, Any]:
+        """Convert SelectedItem - processes single item to component format (similar to Inventory but no array)"""
+        if 'SelectedItem' not in nbt_dict:
+            return nbt_dict
+        
+        selected_item = nbt_dict.get('SelectedItem')
+        if isinstance(selected_item, dict):
+            # Convert item using the same logic as Inventory items
+            converted_item = self._convert_item_dict_to_121_format(selected_item)
+            if converted_item:
+                # Ensure components are present and tag is removed
+                if 'components' in converted_item and converted_item['components']:
+                    # Flatten lore arrays for entity NBT (Inventory/SelectedItem always use flat arrays)
+                    if 'minecraft:lore' in converted_item['components']:
+                        lore = converted_item['components']['minecraft:lore']
+                        if isinstance(lore, list):
+                            # Flatten nested arrays: [[{...}],[{...}]] -> [{...},{...}]
+                            flattened_lore = []
+                            for lore_entry in lore:
+                                if isinstance(lore_entry, list):
+                                    # If it's a nested array, extract the components
+                                    flattened_lore.extend(lore_entry)
+                                else:
+                                    # If it's already a single object, add it
+                                    flattened_lore.append(lore_entry)
+                            # Remove empty lore entries (text is empty string)
+                            flattened_lore = [entry for entry in flattened_lore if not (isinstance(entry, dict) and entry.get('text') == '' and not any(k != 'text' and k != 'italic' for k in entry.keys()))]
+                            # Reorder keys in each lore entry: color, italic, text
+                            def reorder_lore_keys(entry):
+                                if isinstance(entry, dict):
+                                    ordered = {}
+                                    key_order = ["color", "italic", "text"]
+                                    for key in key_order:
+                                        if key in entry:
+                                            ordered[key] = entry[key]
+                                    for key, value in entry.items():
+                                        if key not in key_order:
+                                            ordered[key] = value
+                                    return ordered
+                                return entry
+                            flattened_lore = [reorder_lore_keys(entry) for entry in flattened_lore]
+                            converted_item['components']['minecraft:lore'] = flattened_lore
+                    
+                    # Remove tag field if present (components replace tag)
+                    if 'tag' in converted_item:
+                        del converted_item['tag']
+                    # Also remove any remaining display or other old fields
+                    if 'display' in converted_item:
+                        del converted_item['display']
+                    # Ensure count is present (default to 1 if not specified)
+                    if 'count' not in converted_item:
+                        converted_item['count'] = 1
+                nbt_dict['SelectedItem'] = converted_item
+        
+        return nbt_dict
+    
     def convert_coordinate(self, coord: str) -> str:
         """Convert coordinates to modern format (~1 → ~1.0)"""
         if not coord.startswith('~'):
@@ -144,16 +392,89 @@ class ParameterConverters:
     def convert_block_name(self, block_name: str, data_value: str = '0') -> str:
         """Convert block names using lookup table"""
         try:
+            # Strip quotes if present
+            block_name = block_name.strip('"').strip("'")
             data_int = int(data_value) if data_value != '-1' else 0
-            converted = self.lookups.block_conversions.get((block_name, data_int), block_name)
             
-            # Add minecraft: prefix if not already present and not a coordinate
-            if not converted.startswith('minecraft:') and not any(char in converted for char in '~^'):
-                converted = f"minecraft:{converted}"
-                
-            return converted
+            # Try lookup with original block name
+            lookup_key = (block_name, data_int)
+            converted = self.lookups.block_conversions.get(lookup_key)
+            if converted:
+                # Add minecraft: prefix if not already present and not a coordinate
+                if not converted.startswith('minecraft:') and not any(char in converted for char in '~^'):
+                    converted = f"minecraft:{converted}"
+                return converted
+            
+            # Try with minecraft: prefix if not already present
+            if not block_name.startswith('minecraft:'):
+                lookup_key = (f"minecraft:{block_name}", data_int)
+                converted = self.lookups.block_conversions.get(lookup_key)
+                if converted:
+                    if not converted.startswith('minecraft:') and not any(char in converted for char in '~^'):
+                        converted = f"minecraft:{converted}"
+                    return converted
+            
+            # If not found, return original with minecraft: prefix
+            if not block_name.startswith('minecraft:') and not any(char in block_name for char in '~^'):
+                return f"minecraft:{block_name}"
+            return block_name
         except ValueError:
             # Add minecraft: prefix if not already present and not a coordinate
+            block_name = block_name.strip('"').strip("'")
+            if not block_name.startswith('minecraft:') and not any(char in block_name for char in '~^'):
+                return f"minecraft:{block_name}"
+            return block_name
+    
+    def convert_block_name_legacy(self, block_name: str, data_value: str = '0') -> str:
+        """Convert block names using legacy.json (for project/clock/script commands)
+        
+        Flow:
+        1. Look up block name -> ID in ID_Lookups.csv (via block_name_to_id map)
+        2. Use legacy.json with "id:data" format to get new block name
+        """
+        try:
+            # Strip quotes if present
+            block_name = block_name.strip('"').strip("'")
+            data_int = int(data_value) if data_value != '-1' else 0
+            
+            # Step 1: Look up block name -> ID
+            block_name_lower = block_name.lower()
+            block_id = self.lookups.block_name_to_id.get(block_name_lower)
+            
+            if not block_id:
+                # Try with minecraft: prefix removed
+                if block_name_lower.startswith('minecraft:'):
+                    block_name_lower = block_name_lower[10:]
+                    block_id = self.lookups.block_name_to_id.get(block_name_lower)
+            
+            if not block_id:
+                # Fallback: try direct lookup in block_conversions to find ID
+                # This is a reverse lookup - find any entry with this block name
+                for (key, data), converted in self.lookups.block_conversions.items():
+                    if isinstance(key, str) and key.lower() == block_name_lower and data == data_int:
+                        # Found a match, but we need the ID
+                        # Try to find the ID by looking at the CSV structure
+                        # For now, return the converted name directly
+                        return converted
+                
+                # If still not found, return original with minecraft: prefix
+                if not block_name.startswith('minecraft:') and not any(char in block_name for char in '~^'):
+                    return f"minecraft:{block_name}"
+                return block_name
+            
+            # Step 2: Use legacy.json with "id:data" format
+            legacy_key = f"{block_id}:{data_int}"
+            converted = self.lookups.legacy_blocks.get(legacy_key)
+            
+            if converted:
+                return converted
+            
+            # Fallback: if not in legacy.json, try regular conversion
+            return self.convert_block_name(block_name, data_value)
+            
+        except ValueError:
+            # Add minecraft: prefix if not already present and not a coordinate
+            block_name = block_name.strip('"').strip("'")
             if not block_name.startswith('minecraft:') and not any(char in block_name for char in '~^'):
                 return f"minecraft:{block_name}"
             return block_name
@@ -343,23 +664,7 @@ class ParameterConverters:
         
         return f'@e[{params}]'
     
-    def __init__(self, lookups: LookupTables):
-        self.lookups = lookups
-        # Initialize NBT converter registry
-        self.nbt_registry = NBTConverterRegistry()
-        self._register_nbt_converters()
-    
-    def _register_nbt_converters(self):
-        """Register all NBT component converters - extensible system"""
-        # Equipment converter (ArmorItems/HandItems -> equipment)
-        self.nbt_registry.register('ArmorItems', self._convert_armor_items_component)
-        self.nbt_registry.register('HandItems', self._convert_hand_items_component)
-        # Drop chances converter
-        self.nbt_registry.register('ArmorDropChances', self._convert_armor_drop_chances_component)
-        self.nbt_registry.register('HandDropChances', self._convert_hand_drop_chances_component)
-        # CustomName converter (must be JSON format in 1.21.10)
-        self.nbt_registry.register('CustomName', self._convert_custom_name_nbt)
-    
+    @log_method_call
     def _convert_armor_items_component(self, nbt_dict: Dict[str, Any], context: str) -> Dict[str, Any]:
         """Convert ArmorItems array to equipment structure"""
         if 'ArmorItems' not in nbt_dict:
@@ -386,6 +691,7 @@ class ParameterConverters:
         del nbt_dict['ArmorItems']
         return nbt_dict
     
+    @log_method_call
     def _convert_hand_items_component(self, nbt_dict: Dict[str, Any], context: str) -> Dict[str, Any]:
         """Convert HandItems array to equipment structure"""
         if 'HandItems' not in nbt_dict:
@@ -510,40 +816,112 @@ class ParameterConverters:
         
         Input: {id:"minecraft:golden_axe",Count:1,tag:{ench:[{id:35,lvl:1}]}}
         Output: {id:"minecraft:golden_axe",count:1,components:{"minecraft:enchantments":[...]}}
+        
+        For give commands, the NBT might not have an 'id' field (item ID is separate),
+        so we allow conversion without 'id' field.
         """
-        if not isinstance(item_dict, dict) or 'id' not in item_dict:
+        if not isinstance(item_dict, dict):
             return None
         
+        # Debug
+        import sys
+        print(f"DEBUG _convert_item_dict_to_121_format: item_dict = {item_dict}", file=sys.stderr)
+        
+        # For give commands, NBT might not have 'id' field - create a minimal result dict
         result = {}
         
-        # Convert id (ensure namespaced)
-        item_id = item_dict.get('id', '')
-        if ':' not in item_id:
-            item_id = f'minecraft:{item_id}'
-        result['id'] = item_id
+        # Convert id (ensure namespaced) - only if present
+        if 'id' in item_dict:
+            item_id = item_dict.get('id', '')
+            if ':' not in item_id:
+                item_id = f'minecraft:{item_id}'
+            result['id'] = item_id
+            
+            # Handle skull items with Damage -> convert to specific head type
+            damage = item_dict.get('Damage')
+            if damage is not None and (item_id == 'skull' or item_id == 'minecraft:skull'):
+                skull_map = {
+                    0: 'minecraft:skeleton_skull',
+                    1: 'minecraft:wither_skeleton_skull',
+                    2: 'minecraft:zombie_head',
+                    3: 'minecraft:player_head',
+                    4: 'minecraft:creeper_head',
+                    5: 'minecraft:dragon_head'
+                }
+                new_id = skull_map.get(int(damage))
+                if new_id:
+                    result['id'] = new_id
         
-        # Handle skull items with Damage -> convert to specific head type
-        damage = item_dict.get('Damage')
-        if damage is not None and (item_id == 'skull' or item_id == 'minecraft:skull'):
-            skull_map = {
-                0: 'minecraft:skeleton_skull',
-                1: 'minecraft:wither_skeleton_skull',
-                2: 'minecraft:zombie_head',
-                3: 'minecraft:player_head',
-                4: 'minecraft:creeper_head',
-                5: 'minecraft:dragon_head'
-            }
-            new_id = skull_map.get(int(damage))
-            if new_id:
-                result['id'] = new_id
-        
-        # Convert Count to count
-        count = item_dict.get('Count', 1)
-        result['count'] = int(count)
+        # Convert Count to count - only if present
+        if 'Count' in item_dict:
+            count = item_dict.get('Count', 1)
+            result['count'] = int(count)
         
         # Process tag for components
         components = {}
         tag = item_dict.get('tag', {})
+        other_tag_data = {}  # Store non-convertible tag data
+        
+        # Check for Damage at top level (not in tag) - convert to minecraft:damage component
+        if 'Damage' in item_dict:
+            damage_value = item_dict['Damage']
+            # Convert to integer if it's a string with suffix (e.g., "32s" -> 32)
+            if isinstance(damage_value, str):
+                damage_value = int(damage_value.rstrip('sSbBlLfFdD'))
+            components['minecraft:damage'] = int(damage_value)
+        
+        # Handle display - it can be at top level OR inside tag
+        # For entity NBT (Inventory/SelectedItem), display is usually in tag:{display:{...}}
+        # For give commands, display might be at top level
+        display = item_dict.get('display', {})
+        if not display and isinstance(tag, dict):
+            display = tag.get('display', {})
+        
+        # Debug: Check what we found
+        import sys
+        if display:
+            print(f"DEBUG: Found display = {display}", file=sys.stderr)
+            print(f"DEBUG: display type = {type(display)}", file=sys.stderr)
+            if isinstance(display, dict) and 'Name' in display:
+                print(f"DEBUG: display['Name'] = {display.get('Name')}", file=sys.stderr)
+        
+        if isinstance(display, dict):
+            # Convert display:{color:...} -> minecraft:dyed_color
+            if 'color' in display:
+                components['minecraft:dyed_color'] = int(display['color'])
+            
+            # Convert display:{Name:...} -> minecraft:custom_name (for entity NBT) or minecraft:item_name (for give commands)
+            # Note: For give commands, the prefix is stripped in convert_item_nbt, so we use minecraft:custom_name here
+            if 'Name' in display:
+                name_value = display['Name']
+                # Convert to JSON text component (preserve color codes)
+                import re
+                if '§' in str(name_value):
+                    # Has color codes, convert to JSON
+                    name_json = self._convert_plain_text_to_json(str(name_value))
+                    import json
+                    parsed_name = json.loads(name_json)
+                    # For single-component names, use the object directly; for multi-component, use array
+                    if isinstance(parsed_name, list) and len(parsed_name) == 1:
+                        components['minecraft:custom_name'] = parsed_name[0]
+                    else:
+                        components['minecraft:custom_name'] = parsed_name
+                else:
+                    # Plain text, use as string
+                    components['minecraft:custom_name'] = str(name_value)
+            
+            # Convert display:{Lore:[...]} -> minecraft:lore
+            # For entity NBT, lore should be a flat array of objects, not nested arrays
+            # For give commands with namespaced items, lore should be nested arrays [[{...}],[{...}]]
+            # Note: We don't know the context here, so we keep nested arrays and let convert_item_nbt decide
+            if 'Lore' in display:
+                lore_list = display['Lore']
+                if isinstance(lore_list, list):
+                    converted_lore = self._convert_lore_list_to_121(lore_list)
+                    if converted_lore:
+                        # Keep nested arrays as-is - convert_item_nbt will flatten if needed for non-namespaced items
+                        components['minecraft:lore'] = converted_lore
+        
         if isinstance(tag, dict):
             # Convert enchantments
             if 'ench' in tag:
@@ -553,28 +931,6 @@ class ParameterConverters:
                     if converted_ench:
                         components['minecraft:enchantments'] = converted_ench
             
-            # Convert display:{color:...} -> minecraft:dyed_color
-            display = tag.get('display', {})
-            if isinstance(display, dict):
-                if 'color' in display:
-                    components['minecraft:dyed_color'] = int(display['color'])
-                
-                # Convert display:{Name:...} -> minecraft:item_name
-                if 'Name' in display:
-                    name_value = display['Name']
-                    # Remove color codes and extract plain text
-                    import re
-                    plain_text = re.sub(r'§[0-9a-frlomn]', '', str(name_value))
-                    components['minecraft:item_name'] = plain_text
-                
-                # Convert display:{Lore:[...]} -> minecraft:lore
-                if 'Lore' in display:
-                    lore_list = display['Lore']
-                    if isinstance(lore_list, list):
-                        converted_lore = self._convert_lore_list_to_121(lore_list)
-                        if converted_lore:
-                            components['minecraft:lore'] = converted_lore
-            
             # Convert SkullOwner -> minecraft:profile
             if 'SkullOwner' in tag:
                 skull_owner = tag['SkullOwner']
@@ -582,12 +938,49 @@ class ParameterConverters:
                     profile = self._convert_skull_owner_to_profile(skull_owner)
                     if profile:
                         components['minecraft:profile'] = profile
+            
+            # Convert Damage to minecraft:damage component
+            if 'Damage' in tag:
+                damage_value = tag['Damage']
+                # Convert to integer if it's a string with suffix (e.g., "32s" -> 32)
+                if isinstance(damage_value, str):
+                    damage_value = int(damage_value.rstrip('sSbBlLfFdD'))
+                components['minecraft:damage'] = int(damage_value)
+            
+            # Check for other tag data that should be preserved
+            # In 1.21.9+, Damage is deprecated but might still be present
+            # Other custom data should go to minecraft:custom_data component
+            for key, value in tag.items():
+                if key not in ['display', 'ench', 'SkullOwner', 'Damage']:
+                    # Preserve other tag data (like custom plugin data, etc.)
+                    # These should go to custom_data component if components are used
+                    if key not in other_tag_data:
+                        other_tag_data[key] = value
         
         # Add components if any
         if components:
             result['components'] = components
+            # In 1.21.9+, when components are present, tag should be removed
+            # Remove tag field from result since all data is now in components
+            if 'tag' in result:
+                del result['tag']
+            # Also remove display if it's at top level (should be in components now)
+            if 'display' in result:
+                del result['display']
         
-        return result
+        # Debug: Check what we're returning
+        import sys
+        print(f"DEBUG _convert_item_dict_to_121_format: result keys = {list(result.keys())}", file=sys.stderr)
+        if 'components' in result:
+            print(f"DEBUG: result['components'] = {result['components']}", file=sys.stderr)
+        
+        # If no components were added but we have other data, still return the result
+        # This ensures items without display data are still preserved
+        if result:
+            return result
+        
+        # If result is empty, return None to indicate conversion failed
+        return None
     
     def _convert_enchantments_list(self, ench_list: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
         """Convert enchantment list from 1.12 format to 1.21 format"""
@@ -650,19 +1043,19 @@ class ParameterConverters:
                             comp['italic'] = False
                         # If component has italic:false and text has §o, it should be italic:true (handled by parser)
                         # If component has italic:false and text doesn't have §o, keep it
-                    # If single component, return as object; if multiple, return as array
+                    # All lore lines should be wrapped in arrays (even single components)
                     if len(components) == 1:
-                        result.append(components[0])
+                        result.append(components)  # Wrap single component in array
                     elif len(components) > 1:
                         result.append(components)
                     else:
-                        result.append({"text": "", "italic": False})
+                        result.append([{"text": "", "italic": False}])  # Wrap empty in array
                 elif lore_line.strip():
-                    # Plain text - single component object with italic:false
-                    result.append({"text": lore_line, "italic": False})
+                    # Plain text - single component wrapped in array
+                    result.append([{"text": lore_line, "italic": False}])
                 else:
-                    # Empty line - single component object with italic:false
-                    result.append({"text": "", "italic": False})
+                    # Empty line - single component wrapped in array
+                    result.append([{"text": "", "italic": False}])
             else:
                 result.append({"text": "", "italic": False})
         
@@ -720,11 +1113,19 @@ class ParameterConverters:
             else:
                 current_text += part
         
-        # Add remaining text
+        # Add remaining text (or empty component if formatting was set but no text)
         if current_text:
             comp = current_formatting.copy()
             comp["text"] = current_text
             # Add italic:false if not explicitly set to true
+            if 'italic' not in comp:
+                comp['italic'] = False
+            components.append(comp)
+        elif components and current_formatting:
+            # No remaining text but we have formatting - add empty component
+            # This handles cases where the string ends with a color code (e.g., "§eGate Stone§7")
+            comp = current_formatting.copy()
+            comp["text"] = ""
             if 'italic' not in comp:
                 comp['italic'] = False
             components.append(comp)
@@ -752,6 +1153,7 @@ class ParameterConverters:
                     }
         return None
     
+    @log_method_call
     def _convert_custom_name_nbt(self, nbt_dict: Dict[str, Any], context: str) -> Dict[str, Any]:
         """Convert CustomName to JSON format (required in 1.21.10 to avoid crashes)
         
@@ -785,30 +1187,17 @@ class ParameterConverters:
                 nbt_dict['CustomName'] = {"text": name_value}
         
         return nbt_dict
-
-    def convert_entity_nbt(self, nbt: str) -> str:
-        """Convert entity NBT data - keep structure intact for selectors"""
+    
+    def _convert_active_effects_regex(self, nbt: str) -> str:
+        """Convert ActiveEffects to active_effects with proper attribute names (regex-based fallback)
+        
+        1.12: ActiveEffects:[{Id:14b,Amplifier:1b,Duration:2147000,ShowParticles:0b}]
+        1.20: active_effects:[{id:invisibility,amplifier:1b,duration:2147000,show_particles:0b}]
+        """
         import re
         
-        # Try structured NBT parsing first (for equipment, enchantments, CustomName, etc.)
-        try:
-            # Use the classes defined in this module (they're defined later in the file)
-            # Parse SNBT string to structured Python object
-            nbt_dict = NBTParser.parse_snbt(nbt)
-            
-            # Apply registered converters
-            converted_dict = self.nbt_registry.convert(nbt_dict, "entity")
-            
-            # Serialize back to SNBT string
-            converted_nbt = NBTSerializer.serialize_snbt(converted_dict)
-            
-            # If CustomName was converted to JSON, it's done
-            # Otherwise, fall through to regex-based conversion for CustomName
-            if 'CustomName:{"' in converted_nbt or "CustomName:{" in converted_nbt:
-                return converted_nbt
-        except Exception as e:
-            # Fallback to old regex-based conversion if structured parsing fails
-            pass  # Continue to regex-based conversion below
+        if 'ActiveEffects:' not in nbt:
+            return nbt
         
         # Effect ID to name mapping (1.12 numeric IDs to 1.20 names)
         effect_map = {
@@ -822,38 +1211,949 @@ class ParameterConverters:
             '29': 'conduit_power', '30': 'dolphins_grace', '31': 'bad_omen', '32': 'hero_of_the_village'
         }
         
-        # Basic entity NBT conversions
+        # Convert the attribute name
+        nbt = re.sub(r'ActiveEffects:', 'active_effects:', nbt)
+        
+        # Convert effect IDs to names and attribute casing
+        def convert_effect_entry(match):
+            effect_data = match.group(1)
+            
+            # Convert Id:<number> or Id:<number>b to id:"minecraft:<effect_name>"
+            def convert_id(id_match):
+                effect_id = id_match.group(1)
+                effect_name = effect_map.get(effect_id, 'speed')  # Default to speed if not found
+                return f'id:"minecraft:{effect_name}"'
+            
+            # Match Id: followed by number with optional 'b' suffix
+            effect_data = re.sub(r'Id:(\d+)(?:b)?', convert_id, effect_data)
+            
+            # Convert CamelCase attributes to snake_case
+            # Note: amplifier and show_particles should have 'b' suffix (byte), duration is regular int
+            effect_data = re.sub(r'Amplifier:', 'amplifier:', effect_data)
+            effect_data = re.sub(r'Duration:', 'duration:', effect_data)
+            effect_data = re.sub(r'ShowParticles:', 'show_particles:', effect_data)
+            
+            # Ensure amplifier and show_particles have 'b' suffix if they're 0 or 1 (byte values)
+            # Only add suffix if not already present
+            effect_data = re.sub(r'\bamplifier:([01])(?![bBsSlLfFdD])', r'amplifier:\1b', effect_data)
+            effect_data = re.sub(r'\bshow_particles:([01])(?![bBsSlLfFdD])', r'show_particles:\1b', effect_data)
+            
+            return f'{{{effect_data}}}'
+        
+        # Apply conversion to each effect entry - match Id: followed by number (with or without 'b' suffix)
+        nbt = re.sub(r'\{([^{}]*Id:\d+(?:b)?[^{}]*)\}', convert_effect_entry, nbt)
+        
+        return nbt
+    
+    def _convert_falling_block_recursive(self, nbt: str) -> str:
+        """Recursively convert Block: to BlockState: in NBT (handles Passengers arrays)"""
+        import re
+        
+        # Find all Block: occurrences (including in nested structures like Passengers)
+        # Continue until no more Block: entries exist (that aren't already part of BlockState)
+        max_iterations = 100  # Safety limit
+        iteration = 0
+        while 'Block:' in nbt and iteration < max_iterations:
+            iteration += 1
+            # Find the first occurrence
+            block_start = nbt.find('Block:')
+            if block_start == -1:
+                break
+            
+            # Check if this Block: is already part of a BlockState (skip if so)
+            # Look backwards to see if BlockState: appears before this Block:
+            before_block = nbt[:block_start]
+            # Check if there's a BlockState:{Name:" pattern that this Block: might be part of
+            # We need to check if this Block: is inside a BlockState:{Name:"..."} structure
+            if 'BlockState:' in before_block:
+                last_blockstate = before_block.rfind('BlockState:')
+                # Check the text between BlockState: and Block:
+                between = nbt[last_blockstate:block_start]
+                # If BlockState:{Name:" appears and there's no closing } before Block:, skip it
+                # This Block: is likely part of the BlockState structure
+                if 'BlockState:{Name:"' in between or 'BlockState:{Name:\'' in between:
+                    # Check if there's a closing brace between BlockState: and Block:
+                    # Count braces to see if BlockState is closed
+                    brace_count = 0
+                    in_quotes = False
+                    quote_char = None
+                    for i, char in enumerate(between):
+                        if char in ['"', "'"] and (i == 0 or between[i-1] != '\\'):
+                            if not in_quotes:
+                                in_quotes = True
+                                quote_char = char
+                            elif char == quote_char:
+                                in_quotes = False
+                                quote_char = None
+                        elif not in_quotes:
+                            if char == '{':
+                                brace_count += 1
+                            elif char == '}':
+                                brace_count -= 1
+                                if brace_count < 0:
+                                    # Found closing brace, BlockState is closed
+                                    break
+                    # If brace_count > 0, BlockState is still open, skip this Block:
+                    if brace_count > 0:
+                        # Skip this Block: occurrence by replacing it temporarily
+                        nbt = nbt[:block_start] + '___SKIP_BLOCK___' + nbt[block_start + 6:]
+                        continue
+            
+            # Find the start of the block name (after 'Block:')
+            name_start = block_start + len('Block:')
+            
+            # Find where the block name ends (comma, closing brace, or end of string)
+            # Handle quoted and unquoted block names
+            block_name = ''
+            name_end = name_start
+            
+            # Check if it starts with a quote
+            if name_start < len(nbt) and nbt[name_start] in ['"', "'"]:
+                quote_char = nbt[name_start]
+                # Find the matching closing quote
+                name_end = name_start + 1
+                while name_end < len(nbt):
+                    if nbt[name_end] == quote_char and (name_end == name_start + 1 or nbt[name_end - 1] != '\\'):
+                        name_end += 1
+                        break
+                    name_end += 1
+                block_name = nbt[name_start:name_end]
+            else:
+                # Unquoted block name - find the end (comma, closing brace, or whitespace before comma/brace)
+                name_end = name_start
+                while name_end < len(nbt):
+                    char = nbt[name_end]
+                    if char in [',', '}', ']']:
+                        break
+                    name_end += 1
+                block_name = nbt[name_start:name_end]
+            
+            # Extract the actual block name (remove quotes if present)
+            block_name_clean = block_name.strip('"').strip("'").strip()
+            # Remove minecraft: prefix if present (will be added by convert_block_name if needed)
+            if block_name_clean.startswith('minecraft:'):
+                block_name_clean = block_name_clean[10:]
+            
+            # Check if there's a Data: value following this Block:
+            # Look for "Data:" after the block name, before the next comma or closing brace
+            remaining = nbt[name_end:]
+            data_match = re.search(r'^\s*,\s*Data:(\d+)', remaining)
+            
+            if data_match:
+                # Has Data: value
+                data_value = data_match.group(1)
+                # Convert using the block lookup table
+                converted_block = self.convert_block_name(block_name_clean, data_value)
+                # Replace Block:<name>,Data:<value> with BlockState:{Name:"..."}
+                replacement = f'BlockState:{{Name:"{converted_block}"}}'
+                # Calculate the end position including the Data: part
+                data_end = name_end + data_match.end()
+                nbt = nbt[:block_start] + replacement + nbt[data_end:]
+            else:
+                # No Data: value, assume Data:0
+                # Convert using the block lookup table
+                converted_block = self.convert_block_name(block_name_clean, '0')
+                # Replace Block:<name> with BlockState:{Name:"..."}
+                replacement = f'BlockState:{{Name:"{converted_block}"}}'
+                nbt = nbt[:block_start] + replacement + nbt[name_end:]
+        
+        # Restore any skipped Block: occurrences
+        nbt = nbt.replace('___SKIP_BLOCK___', 'Block:')
+        
+        return nbt
+    
+    def _convert_active_effects_recursive(self, nbt: str) -> str:
+        """Recursively convert ActiveEffects to active_effects in NBT (handles Passengers arrays)"""
+        import re
+        
+        # Find all ActiveEffects: occurrences (including in nested structures like Passengers)
+        while 'ActiveEffects:' in nbt:
+            # Find the first occurrence
+            active_effects_start = nbt.find('ActiveEffects:')
+            if active_effects_start == -1:
+                break
+            
+            # Find the start of the array (after 'ActiveEffects:')
+            array_start = active_effects_start + len('ActiveEffects:')
+            
+            # Find the matching bracket for the array
+            bracket_start = array_start
+            if bracket_start < len(nbt) and nbt[bracket_start] == '[':
+                # Find matching closing bracket
+                depth = 1
+                bracket_end = bracket_start + 1
+                in_quotes = False
+                quote_char = None
+                
+                for i in range(bracket_start + 1, len(nbt)):
+                    char = nbt[i]
+                    if char in ['"', "'"] and (i == 0 or nbt[i-1] != '\\'):
+                        if not in_quotes:
+                            in_quotes = True
+                            quote_char = char
+                        elif char == quote_char:
+                            in_quotes = False
+                            quote_char = None
+                    elif not in_quotes:
+                        if char == '[':
+                            depth += 1
+                        elif char == ']':
+                            depth -= 1
+                            if depth == 0:
+                                bracket_end = i
+                                break
+                
+                if bracket_end > bracket_start:
+                    # Extract the array content
+                    array_content = nbt[bracket_start + 1:bracket_end]
+                    
+                    # Convert ActiveEffects: to active_effects:
+                    nbt = nbt[:active_effects_start] + 'active_effects:' + nbt[array_start:]
+                    
+                    # Convert effect entries within this array
+                    effect_map = {
+                        '1': 'speed', '2': 'slowness', '3': 'haste', '4': 'mining_fatigue',
+                        '5': 'strength', '6': 'instant_health', '7': 'instant_damage', '8': 'jump_boost',
+                        '9': 'nausea', '10': 'regeneration', '11': 'resistance', '12': 'fire_resistance',
+                        '13': 'water_breathing', '14': 'invisibility', '15': 'blindness', '16': 'night_vision',
+                        '17': 'hunger', '18': 'weakness', '19': 'poison', '20': 'wither',
+                        '21': 'health_boost', '22': 'absorption', '23': 'saturation', '24': 'glowing',
+                        '25': 'levitation', '26': 'luck', '27': 'unluck', '28': 'slow_falling',
+                        '29': 'conduit_power', '30': 'dolphins_grace', '31': 'bad_omen', '32': 'hero_of_the_village'
+                    }
+                    
+                    def convert_effect_entry(match):
+                        effect_data = match.group(1)
+                        def convert_id(id_match):
+                            effect_id = id_match.group(1)
+                            effect_name = effect_map.get(effect_id, 'speed')
+                            return f'id:"minecraft:{effect_name}"'
+                        # Match Id: followed by number with optional 'b' suffix
+                        # Match Id: followed by number with optional 'b' suffix
+                        effect_data = re.sub(r'Id:(\d+)(?:b)?', convert_id, effect_data)
+                        effect_data = re.sub(r'Amplifier:', 'amplifier:', effect_data)
+                        effect_data = re.sub(r'Duration:', 'duration:', effect_data)
+                        effect_data = re.sub(r'ShowParticles:', 'show_particles:', effect_data)
+                        
+                        # Ensure amplifier and show_particles have 'b' suffix if they're 0 or 1 (byte values)
+                        # Only add suffix if not already present
+                        effect_data = re.sub(r'\bamplifier:([01])(?![bBsSlLfFdD])', r'amplifier:\1b', effect_data)
+                        effect_data = re.sub(r'\bshow_particles:([01])(?![bBsSlLfFdD])', r'show_particles:\1b', effect_data)
+                        
+                        return f'{{{effect_data}}}'
+                    
+                    # Convert effects in the array content - match Id: followed by number (with or without 'b' suffix)
+                    converted_array = re.sub(r'\{([^{}]*Id:\d+(?:b)?[^{}]*)\}', convert_effect_entry, array_content)
+                    
+                    # Replace the array content
+                    active_effects_start_new = nbt.find('active_effects:', active_effects_start)
+                    if active_effects_start_new != -1:
+                        array_start_new = active_effects_start_new + len('active_effects:')
+                        bracket_start_new = array_start_new
+                        if bracket_start_new < len(nbt) and nbt[bracket_start_new] == '[':
+                            depth = 1
+                            bracket_end_new = bracket_start_new + 1
+                            in_quotes = False
+                            quote_char = None
+                            for i in range(bracket_start_new + 1, len(nbt)):
+                                char = nbt[i]
+                                if char in ['"', "'"] and (i == 0 or nbt[i-1] != '\\'):
+                                    if not in_quotes:
+                                        in_quotes = True
+                                        quote_char = char
+                                    elif char == quote_char:
+                                        in_quotes = False
+                                        quote_char = None
+                                elif not in_quotes:
+                                    if char == '[':
+                                        depth += 1
+                                    elif char == ']':
+                                        depth -= 1
+                                        if depth == 0:
+                                            bracket_end_new = i
+                                            break
+                            if bracket_end_new > bracket_start_new:
+                                nbt = nbt[:bracket_start_new + 1] + converted_array + nbt[bracket_end_new:]
+            else:
+                # No array found, just convert the name
+                nbt = nbt[:active_effects_start] + 'active_effects:' + nbt[array_start:]
+        
+        return nbt
+    
+    def _convert_inventory_items_recursive(self, nbt: str) -> str:
+        """Recursively convert item NBT in Inventory arrays (for execute if entity selectors)
+        
+        Converts items in Inventory arrays from 1.12 format (display:{Name:...,Lore:...})
+        to 1.21 format (custom_name=...,lore=...) using brackets [] for components.
+        """
+        import re
+        
+        # Find all Inventory: occurrences
+        max_iterations = 100  # Safety limit to prevent infinite loops
+        iteration = 0
+        while ('Inventory:' in nbt or 'inventory:' in nbt) and iteration < max_iterations:
+            iteration += 1
+            # Find the first occurrence (case-insensitive)
+            inventory_start = nbt.find('Inventory:')
+            if inventory_start == -1:
+                inventory_start = nbt.find('inventory:')
+            if inventory_start == -1:
+                break
+            
+            # Find the start of the array (after 'Inventory:' or 'inventory:')
+            array_start = inventory_start + len('Inventory:') if 'Inventory:' in nbt[inventory_start:inventory_start+10] else inventory_start + len('inventory:')
+            
+            # Find the matching bracket for the array
+            bracket_start = array_start
+            if bracket_start < len(nbt) and nbt[bracket_start] == '[':
+                # Find matching closing bracket
+                depth = 1
+                bracket_end = bracket_start + 1
+                in_quotes = False
+                quote_char = None
+                
+                for i in range(bracket_start + 1, len(nbt)):
+                    char = nbt[i]
+                    if char in ['"', "'"] and (i == 0 or nbt[i-1] != '\\'):
+                        if not in_quotes:
+                            in_quotes = True
+                            quote_char = char
+                        elif char == quote_char:
+                            in_quotes = False
+                            quote_char = None
+                    elif not in_quotes:
+                        if char == '[':
+                            depth += 1
+                        elif char == ']':
+                            depth -= 1
+                            if depth == 0:
+                                bracket_end = i
+                                break
+                
+                if bracket_end > bracket_start:
+                    # Extract the array content
+                    array_content = nbt[bracket_start + 1:bracket_end]
+                    
+                    # Convert each item in the array
+                    # Items are separated by commas at the top level
+                    items = []
+                    current_item = ""
+                    brace_depth = 0
+                    bracket_depth = 0
+                    in_quotes = False
+                    quote_char = None
+                    
+                    for char in array_content:
+                        if char in ['"', "'"] and (not current_item or current_item[-1] != '\\'):
+                            if not in_quotes:
+                                in_quotes = True
+                                quote_char = char
+                            elif char == quote_char:
+                                in_quotes = False
+                                quote_char = None
+                            current_item += char
+                        elif not in_quotes:
+                            if char == '{':
+                                brace_depth += 1
+                                current_item += char
+                            elif char == '}':
+                                brace_depth -= 1
+                                current_item += char
+                            elif char == '[':
+                                bracket_depth += 1
+                                current_item += char
+                            elif char == ']':
+                                bracket_depth -= 1
+                                current_item += char
+                            elif char == ',' and brace_depth == 0 and bracket_depth == 0:
+                                if current_item.strip():
+                                    # Convert this item's NBT
+                                    converted_item = self._convert_item_nbt_in_entity_context(current_item.strip())
+                                    items.append(converted_item)
+                                current_item = ""
+                            else:
+                                current_item += char
+                        else:
+                            current_item += char
+                    
+                    # Add the last item
+                    if current_item.strip():
+                        converted_item = self._convert_item_nbt_in_entity_context(current_item.strip())
+                        items.append(converted_item)
+                    
+                    # Replace the array content with converted items
+                    converted_array = ','.join(items)
+                    new_nbt = nbt[:bracket_start + 1] + converted_array + nbt[bracket_end:]
+                    # Only update if something changed (prevents infinite loops)
+                    if new_nbt != nbt:
+                        nbt = new_nbt
+                    else:
+                        # No change made, skip this Inventory: to prevent infinite loop
+                        # Replace "Inventory:" temporarily to skip it
+                        nbt = nbt[:inventory_start] + '___PROCESSED_INVENTORY___' + nbt[inventory_start + 10:]
+            else:
+                # No array found, skip this Inventory: to prevent infinite loop
+                nbt = nbt[:inventory_start] + '___PROCESSED_INVENTORY___' + nbt[inventory_start + 10:]
+        
+        # Restore any skipped Inventory: markers
+        nbt = nbt.replace('___PROCESSED_INVENTORY___', 'Inventory:')
+        
+        return nbt
+    
+    def _fix_display_quotes(self, nbt: str) -> str:
+        """Ensure display.Name and display.Lore have properly escaped JSON strings
+        Ensures double quotes are properly escaped for compatibility in selector parameters.
+        This handles cases where structured parser or other conversion steps output unescaped JSON.
+        NOTE: This should NOT be called on NBT that has already been processed by
+        _convert_inventory_items_recursive, as that function already outputs escaped JSON.
+        """
+        import re
+        
+        # Fix Name:"{...}" -> Name:'{...}' 
+        # Find Name:" then find the matching closing quote after the JSON object
+        while 'Name:"{' in nbt:
+            name_start = nbt.find('Name:"{')
+            if name_start == -1:
+                break
+            
+            # Find the opening brace (after Name:")
+            brace_start = name_start + 6  # After 'Name:"{'
+            
+            # Find the matching closing brace
+            brace_count = 1
+            brace_end = brace_start
+            in_quotes = False
+            quote_char = None
+            
+            while brace_end < len(nbt) and brace_count > 0:
+                char = nbt[brace_end]
+                if char in ['"', "'"] and (brace_end == 0 or nbt[brace_end - 1] != '\\'):
+                    if not in_quotes:
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_quotes = False
+                        quote_char = None
+                elif not in_quotes:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                brace_end += 1
+            
+            if brace_count == 0:
+                # Found the matching closing brace, now find the closing quote
+                quote_end = brace_end
+                while quote_end < len(nbt) and nbt[quote_end] != '"' and nbt[quote_end] not in [',', '}']:
+                    quote_end += 1
+                
+                if quote_end < len(nbt) and nbt[quote_end] == '"':
+                    # Extract the JSON content (between the braces)
+                    json_content = nbt[brace_start-1:brace_end]  # Include the braces
+                    # Ensure proper escaping for double quotes (required for selector parameters)
+                    json_content_escaped = json_content.replace('\\', r'\\').replace('"', r'\"')
+                    replacement = f'Name:"{json_content_escaped}"'
+                    nbt = nbt[:name_start] + replacement + nbt[quote_end + 1:]
+                else:
+                    break
+            else:
+                break
+        
+        # Fix Lore array elements: "{"text":...}" -> '{"text":...}'
+        # Find each quoted JSON string in Lore arrays and convert quotes
+        while 'Lore:[' in nbt and '"{"text"' in nbt:
+            lore_start = nbt.find('Lore:[')
+            if lore_start == -1:
+                break
+            
+            # Find the matching closing bracket
+            bracket_count = 1
+            bracket_end = lore_start + 6
+            in_quotes = False
+            quote_char = None
+            
+            while bracket_end < len(nbt) and bracket_count > 0:
+                char = nbt[bracket_end]
+                if char in ['"', "'"] and (bracket_end == 0 or nbt[bracket_end - 1] != '\\'):
+                    if not in_quotes:
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_quotes = False
+                        quote_char = None
+                elif not in_quotes:
+                    if char == '[':
+                        bracket_count += 1
+                    elif char == ']':
+                        bracket_count -= 1
+                bracket_end += 1
+            
+            if bracket_count == 0:
+                # Found the Lore array, now fix quotes inside it
+                lore_content = nbt[lore_start + 6:bracket_end - 1]
+                original_lore = lore_content
+                
+                # Ensure all JSON strings are properly escaped with double quotes
+                # First, handle unquoted JSON strings: {"text":...} -> "{\"text\":...}"
+                def quote_and_escape_json(match):
+                    json_content = match.group(2)  # The JSON object part
+                    # Escape quotes and backslashes for double-quoted string
+                    json_content_escaped = json_content.replace('\\', r'\\').replace('"', r'\"')
+                    return f'{match.group(1)}"{json_content_escaped}"{match.group(3)}'
+                
+                # Match unquoted JSON objects in the array and quote/escape them
+                fixed_lore = re.sub(r'([,\[])(\{[^}]*"text"[^}]*\})([,\]])', quote_and_escape_json, lore_content)
+                
+                # Then, fix already-quoted JSON strings that might not be properly escaped
+                # Pattern: "{"text":...}" - ensure inner quotes are escaped (but don't double-escape)
+                def ensure_escaped_quotes(match):
+                    full_match = match.group(0)  # The whole "..." string
+                    json_content = match.group(1)  # The JSON object inside quotes
+                    # Check if quotes are already escaped - if they are, don't re-escape
+                    # Look for patterns like \" which indicate already escaped
+                    if '\\"' in json_content or json_content.count('\\') > json_content.count('"'):
+                        # Already escaped, return as-is
+                        return full_match
+                    # Not escaped, escape it
+                    json_content_escaped = json_content.replace('\\', r'\\').replace('"', r'\"')
+                    return f'"{json_content_escaped}"'
+                
+                fixed_lore = re.sub(r'"(\{[^}]*"text"[^}]*\})"', ensure_escaped_quotes, fixed_lore)
+                
+                if fixed_lore != original_lore:
+                    nbt = nbt[:lore_start + 6] + fixed_lore + nbt[bracket_end - 1:]
+                    continue
+            
+            break
+        
+        return nbt
+    
+    def _convert_plain_text_to_json(self, text: str) -> str:
+        """Convert plain text with § codes to JSON - handles sequential codes properly"""
+        import re
+        import json
+        
+        if '§' not in text:
+            # For 1.21, always include italic:false
+            return json.dumps({"text": text, "italic": False})
+        
+        # Split text by § codes, keeping the codes as separate parts
+        parts = re.split(r'(§[0-9a-frlomn])', text)
+        
+        components = []
+        current_text = ""
+        current_formatting = {}
+        
+        for part in parts:
+            if part.startswith('§'):
+                # This is a color code
+                if current_text:
+                    # Save previous component
+                    comp = {"text": current_text}
+                    comp.update(current_formatting)
+                    components.append(comp)
+                    current_text = ""
+                    current_formatting = {}
+                
+                # Process the color code
+                code = part[1].lower()
+                if code in ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f']:
+                    # Color code - reset formatting and set color
+                    current_formatting = {"color": self._get_color_name(code)}
+                elif code == 'r':
+                    # Reset - clear all formatting
+                    current_formatting = {}
+                elif code == 'l':
+                    current_formatting["bold"] = True
+                elif code == 'm':
+                    current_formatting["strikethrough"] = True
+                elif code == 'n':
+                    current_formatting["underline"] = True
+                elif code == 'o':
+                    current_formatting["italic"] = True
+            else:
+                current_text += part
+        
+        # Add any remaining text (or empty component if formatting was set but no text)
+        if current_text:
+            component = {"text": current_text}
+            component.update(current_formatting)
+            components.append(component)
+        elif components and current_formatting:
+            # No remaining text but we have formatting - add empty component
+            # This handles cases where the string ends with a color code (e.g., "§eGate Stone§7")
+            component = current_formatting.copy()
+            component["text"] = ""
+            components.append(component)
+        
+        # Don't filter out empty components - keep them for proper multi-component names
+        # Empty components are needed when color codes change (e.g., "§eGate Stone§7" -> [yellow "Gate Stone", gray ""])
+        
+        # Always add italic:false to each component (required in 1.21)
+        for comp in components:
+            if "italic" not in comp:
+                comp["italic"] = False
+        
+        # Reorder keys to put "color", "italic", "text" in that order (for entity NBT components)
+        def reorder_keys(comp):
+            if isinstance(comp, dict):
+                ordered = {}
+                # Order: color, italic, text (for entity NBT)
+                key_order = ["color", "italic", "text"]
+                for key in key_order:
+                    if key in comp:
+                        ordered[key] = comp[key]
+                # Add any other keys that weren't in the order list
+                for key, value in comp.items():
+                    if key not in key_order:
+                        ordered[key] = value
+                return ordered
+            return comp
+        
+        components = [reorder_keys(comp) for comp in components]
+        
+        # Always return array format for consistency (even for single component)
+        # This ensures multi-component names are properly handled
+        return json.dumps(components)
+    
+    def _get_color_name(self, code: str) -> str:
+        """Convert § color code to color name"""
+        color_map = {
+            '0': 'black', '1': 'dark_blue', '2': 'dark_green', '3': 'dark_aqua',
+            '4': 'dark_red', '5': 'dark_purple', '6': 'gold', '7': 'gray',
+            '8': 'dark_gray', '9': 'blue', 'a': 'green', 'b': 'aqua',
+            'c': 'red', 'd': 'light_purple', 'e': 'yellow', 'f': 'white'
+        }
+        return color_map.get(code.lower(), 'white')
+    
+    def _convert_item_nbt_in_entity_context(self, item_str: str) -> str:
+        """Convert item NBT from 1.12 format to 1.21 format when found in entity NBT (Inventory arrays)
+        
+        IMPORTANT: In Minecraft 1.21.9+, items in entity NBT (like Inventory arrays) should use
+        components:{"minecraft:custom_name":...,"minecraft:lore":...} format, NOT display format.
+        Components use raw JSON (no escaping) since they are COMPOUND/LIST tags.
+        """
+        import re
+        
+        # Check if item has display tag or tag with display
+        has_display = 'display:{' in item_str or (',tag:{' in item_str and 'display:{' in item_str)
+        if not has_display:
+            return item_str
+        
+        import json
+        
+        # Parse the item NBT to extract display data
+        # We need to find tag:{display:{...}} or just display:{...}
+        result = item_str
+        
+        # Try to parse as structured NBT first (more reliable)
+        try:
+            # Find the item NBT structure
+            # Look for tag:{display:{...}} pattern
+            tag_pattern = re.compile(r'tag:\{([^}]*display:\{[^}]*\}[^}]*)\}')
+            tag_match = tag_pattern.search(result)
+            
+            if tag_match:
+                # Has tag structure, need to convert display to components
+                tag_content = tag_match.group(1)
+                display_match = re.search(r'display:\{([^}]*)\}', tag_content)
+                
+                if display_match:
+                    display_content = display_match.group(1)
+                    components = {}
+                    
+                    # Extract Name if present
+                    name_match = re.search(r'Name:["\']([^"\']*)["\']', display_content)
+                    if name_match:
+                        name_value = name_match.group(1)
+                        # Remove color codes and convert to JSON text component
+                        name_value_clean = re.sub(r'§[0-9a-frlomn]', '', name_value)
+                        if '§' in name_value:
+                            # Has color codes, convert to JSON
+                            name_json = self._convert_plain_text_to_json(name_value)
+                            components['minecraft:item_name'] = json.loads(name_json)
+                        else:
+                            # Plain text, use as string (components accept strings or objects)
+                            components['minecraft:item_name'] = name_value_clean
+                    
+                    # Extract Lore if present
+                    lore_match = re.search(r'Lore:\[(.*?)\]', display_content, re.DOTALL)
+                    if lore_match:
+                        lore_content = lore_match.group(1)
+                        # Parse lore entries (they're quoted strings)
+                        lore_entries = []
+                        # Split by commas, handling quoted strings
+                        current_entry = ""
+                        in_quotes = False
+                        quote_char = None
+                        for char in lore_content:
+                            if char in ['"', "'"] and (not current_entry or current_entry[-1] != '\\'):
+                                if not in_quotes:
+                                    in_quotes = True
+                                    quote_char = char
+                                elif char == quote_char:
+                                    in_quotes = False
+                                    quote_char = None
+                                current_entry += char
+                            elif char == ',' and not in_quotes:
+                                if current_entry.strip():
+                                    # Remove quotes and process
+                                    entry = current_entry.strip().strip('"').strip("'")
+                                    if '§' in entry:
+                                        # Has color codes, convert to JSON components
+                                        lore_comp = self._parse_color_codes_to_components(entry)
+                                        if len(lore_comp) == 1:
+                                            lore_entries.append(lore_comp[0])
+                                        elif len(lore_comp) > 1:
+                                            lore_entries.append(lore_comp)
+                                        else:
+                                            lore_entries.append({"text": "", "italic": False})
+                                    elif entry.strip():
+                                        lore_entries.append({"text": entry, "italic": False})
+                                    else:
+                                        lore_entries.append({"text": "", "italic": False})
+                                current_entry = ""
+                            else:
+                                current_entry += char
+                        
+                        # Add last entry
+                        if current_entry.strip():
+                            entry = current_entry.strip().strip('"').strip("'")
+                            if '§' in entry:
+                                lore_comp = self._parse_color_codes_to_components(entry)
+                                if len(lore_comp) == 1:
+                                    lore_entries.append(lore_comp[0])
+                                elif len(lore_comp) > 1:
+                                    lore_entries.append(lore_comp)
+                                else:
+                                    lore_entries.append({"text": "", "italic": False})
+                            elif entry.strip():
+                                lore_entries.append({"text": entry, "italic": False})
+                            else:
+                                lore_entries.append({"text": "", "italic": False})
+                        
+                        if lore_entries:
+                            components['minecraft:lore'] = lore_entries
+                    
+                    # Replace tag:{display:{...}} with components:{...}
+                    if components:
+                        # Serialize components to SNBT format (raw JSON, no escaping)
+                        components_str = ','.join([f'"{k}":{json.dumps(v)}' for k, v in components.items()])
+                        replacement = f'components:{{{components_str}}}'
+                        
+                        # Find the full tag:{} block and replace display part with components
+                        # For now, replace the entire tag block
+                        tag_start = result.find('tag:{')
+                        if tag_start != -1:
+                            # Find matching closing brace for tag
+                            tag_brace_start = tag_start + 4
+                            tag_brace_count = 1
+                            tag_brace_end = tag_brace_start
+                            while tag_brace_end < len(result) and tag_brace_count > 0:
+                                if result[tag_brace_end] == '{':
+                                    tag_brace_count += 1
+                                elif result[tag_brace_end] == '}':
+                                    tag_brace_count -= 1
+                                tag_brace_end += 1
+                            
+                            # Replace tag:{...} with components:{...}
+                            # But preserve other tag content if any
+                            tag_content_full = result[tag_brace_start:tag_brace_end-1]
+                            # Check if there's other content besides display
+                            other_content = tag_content_full.replace(display_match.group(0), '').strip(',').strip()
+                            
+                            if other_content:
+                                # Has other tag content, keep tag and add components
+                                result = result[:tag_start] + f'tag:{{{other_content}}},{replacement}' + result[tag_brace_end-1:]
+                            else:
+                                # Only display, replace tag with components
+                                result = result[:tag_start] + replacement + result[tag_brace_end-1:]
+        except Exception:
+            # If parsing fails, fall back to regex-based conversion
+            pass
+        
+        return result
+    
+    def _convert_lore_array_to_json_strings(self, lore_content: str) -> str:
+        """Convert lore array content to array of JSON strings for display:Lore in entity NBT
+        
+        Input: "text1","text2" (comma-separated quoted strings)
+        Output: '{"text":"text1","italic":false}','{"text":"text2","italic":false}' (JSON strings)
+        """
+        import re
+        import json
+        
+        # Split by commas, but be careful about nested structures and quoted strings
+        lines = []
+        current_line = ""
+        bracket_count = 0
+        in_quotes = False
+        quote_char = None
+        
+        for char in lore_content:
+            if char in ['"', "'"] and (not current_line or current_line[-1] != '\\'):
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = char
+                elif char == quote_char:
+                    in_quotes = False
+                    quote_char = None
+                current_line += char
+            elif char == '{' and not in_quotes:
+                bracket_count += 1
+                current_line += char
+            elif char == '}' and not in_quotes:
+                bracket_count -= 1
+                current_line += char
+            elif char == ',' and bracket_count == 0 and not in_quotes:
+                if current_line.strip():
+                    lines.append(current_line.strip())
+                current_line = ""
+                continue
+            else:
+                current_line += char
+        
+        if current_line.strip():
+            lines.append(current_line.strip())
+        
+        converted_lines = []
+        for line in lines:
+            # Remove quotes if present, but preserve escaped content
+            # Check if line is already a JSON string (starts with { and contains "text")
+            if line.strip().startswith('{') and '"text"' in line:
+                # Already JSON, check if it's escaped
+                if '\\"' in line or line.count('\\') > line.count('"'):
+                    # Already escaped, just wrap in double quotes
+                    converted_lines.append(f'"{line}"')
+                else:
+                    # JSON but not escaped, escape it
+                    json_text_escaped = line.replace('\\', r'\\').replace('"', r'\"')
+                    converted_lines.append(f'"{json_text_escaped}"')
+                continue
+            
+            # Remove quotes if present
+            line = line.strip().strip('"').strip("'")
+            
+            # Handle empty lines
+            if not line:
+                # Escape quotes for double-quoted string (required for compatibility in selector parameters)
+                converted_lines.append('"{\\"text\\":\\"\\",\\"italic\\":false}"')
+                continue
+            
+            # Convert to JSON format
+            if '§' in line:
+                json_text = self._convert_plain_text_to_json(line)
+            else:
+                json_text = json.dumps({"text": line, "italic": False})
+            
+            # Escape quotes for double-quoted string (required for compatibility in selector parameters)
+            # This ensures proper escaping when NBT is used in selector parameters like nbt={...}
+            # First escape backslashes, then escape quotes (order matters!)
+            json_text_escaped = json_text.replace('\\', r'\\').replace('"', r'\"')
+            converted_lines.append(f'"{json_text_escaped}"')
+        
+        return ','.join(converted_lines)
+    
+    def _find_matching_bracket_for_item(self, start_pos: int, text: str) -> int:
+        """Find matching closing bracket starting from start_pos (for item NBT parsing)"""
+        if start_pos >= len(text) or text[start_pos] != '[':
+            return -1
+        
+        depth = 1
+        in_quotes = False
+        quote_char = None
+        
+        for i in range(start_pos + 1, len(text)):
+            char = text[i]
+            if char in ['"', "'"] and (i == 0 or text[i-1] != '\\'):
+                if not in_quotes:
+                    in_quotes = True
+                    quote_char = char
+                elif char == quote_char:
+                    in_quotes = False
+                    quote_char = None
+            elif not in_quotes:
+                if char == '[':
+                    depth += 1
+                elif char == ']':
+                    depth -= 1
+                    if depth == 0:
+                        return i
+        
+        return -1
+    
+    @log_method_call
+    def convert_entity_nbt(self, nbt: str) -> str:
+        """Convert entity NBT data - keep structure intact for selectors
+        
+        Uses structured NBT parsing (NBTParser/NBTSerializer/NBTConverterRegistry) for all entity NBT.
+        This ensures consistent conversion of equipment, drop_chances, CustomName, enchantments, etc.
+        Falls back to regex-based conversion only if structured parsing fails.
+        """
+        import re
+        
+        # ALWAYS try structured NBT parsing first (for equipment, enchantments, CustomName, etc.)
+        # This is the same logic used for Cryptkeeper and should be applied to all entity NBT
+        try:
+            # Parse SNBT string to structured Python object
+            nbt_dict = NBTParser.parse_snbt(nbt)
+            
+            # Debug: Check what was parsed
+            import sys
+            if 'Inventory' in nbt_dict:
+                print(f"DEBUG convert_entity_nbt: Found Inventory, type = {type(nbt_dict['Inventory'])}, value = {nbt_dict['Inventory']}", file=sys.stderr)
+            if 'SelectedItem' in nbt_dict:
+                print(f"DEBUG convert_entity_nbt: Found SelectedItem, type = {type(nbt_dict['SelectedItem'])}, value = {nbt_dict['SelectedItem']}", file=sys.stderr)
+            
+            # Apply registered converters (equipment, drop_chances, CustomName, etc.)
+            # Use self.nbt_registry (this is ParameterConverters' registry which has Inventory and SelectedItem)
+            import sys
+            print(f"DEBUG convert_entity_nbt: About to call convert, registry has = {list(self.nbt_registry.converters.keys())}", file=sys.stderr)
+            converted_dict = self.nbt_registry.convert(nbt_dict, "entity")
+            
+            # Debug: Check what was converted
+            if 'Inventory' in converted_dict:
+                print(f"DEBUG convert_entity_nbt: After conversion, Inventory = {converted_dict['Inventory']}", file=sys.stderr)
+            if 'SelectedItem' in converted_dict:
+                print(f"DEBUG convert_entity_nbt: After conversion, SelectedItem = {converted_dict['SelectedItem']}", file=sys.stderr)
+            
+            # Serialize back to SNBT string
+            converted_nbt = NBTSerializer.serialize_snbt(converted_dict)
+            
+            # Apply additional regex-based conversions that aren't handled by structured parsing
+            # (These are basic fixes that don't require structured parsing)
+            converted_nbt = re.sub(r'MaxHeatlh:', 'MaxHealth:', converted_nbt)  # Fix typo
+            converted_nbt = re.sub(r'Fuse:', 'fuse:', converted_nbt)  # Fuse must be lowercase in 1.20+
+            
+            # Convert ActiveEffects to active_effects (recursively handles Passengers arrays)
+            if 'ActiveEffects:' in converted_nbt:
+                converted_nbt = self._convert_active_effects_recursive(converted_nbt)
+            
+            # Convert falling_block Block and Data to BlockState (recursively handles Passengers arrays)
+            # This must happen after structured parsing to ensure nested structures are processed
+            converted_nbt = self._convert_falling_block_recursive(converted_nbt)
+            
+            # Structured parser should have already converted Inventory items to components format
+            # No need to call _convert_inventory_items_recursive here since structured parser handles it
+            # Fix any display.Name or display.Lore that might still need escaping (for non-Inventory contexts)
+            converted_nbt = self._fix_display_quotes(converted_nbt)
+            
+            # Return the structured conversion result
+            return converted_nbt
+        except Exception as e:
+            # Fallback to old regex-based conversion if structured parsing fails
+            # Log the error for debugging but continue with regex fallback
+            import traceback
+            print(f"Warning: Structured NBT parsing failed ({e}). Falling back to regex-based conversion.")
+            traceback.print_exc()
+            pass  # Continue to regex-based conversion below
+        
+        # Basic entity NBT conversions (regex-based fallback only)
         nbt = re.sub(r'MaxHeatlh:', 'MaxHealth:', nbt)  # Fix typo
         nbt = re.sub(r'Fuse:', 'fuse:', nbt)  # Fuse must be lowercase in 1.20+
         
-        # Convert ActiveEffects to active_effects with proper attribute names
-        # 1.12: ActiveEffects:[{Id:14b,Amplifier:1b,Duration:2147000,ShowParticles:0b}]
-        # 1.20: active_effects:[{id:invisibility,amplifier:1b,duration:2147000,show_particles:0b}]
-        if 'ActiveEffects:' in nbt:
-            # Convert the attribute name
-            nbt = re.sub(r'ActiveEffects:', 'active_effects:', nbt)
-            
-            # Convert effect IDs to names and attribute casing
-            def convert_effect_entry(match):
-                effect_data = match.group(1)
-                
-                # Convert Id:<number>b to id:<effect_name>
-                def convert_id(id_match):
-                    effect_id = id_match.group(1)
-                    effect_name = effect_map.get(effect_id, 'speed')  # Default to speed if not found
-                    return f'id:{effect_name}'
-                
-                effect_data = re.sub(r'Id:(\d+)b', convert_id, effect_data)
-                
-                # Convert CamelCase attributes to snake_case
-                effect_data = re.sub(r'Amplifier:', 'amplifier:', effect_data)
-                effect_data = re.sub(r'Duration:', 'duration:', effect_data)
-                effect_data = re.sub(r'ShowParticles:', 'show_particles:', effect_data)
-                
-                return f'{{{effect_data}}}'
-            
-            # Apply conversion to each effect entry
-            nbt = re.sub(r'\{([^{}]*Id:\d+b[^{}]*)\}', convert_effect_entry, nbt)
+        # Convert ActiveEffects to active_effects (recursively handles Passengers arrays)
+        nbt = self._convert_active_effects_recursive(nbt)
         
         # Convert enchantments from numeric IDs to string names
         # 1.12: ench:[{id:35,lvl:1}] or tag:{ench:[...]}
@@ -972,33 +2272,8 @@ class ParameterConverters:
         # Match unquoted item IDs: id:item_name (only in item contexts - followed by comma or })
         nbt = re.sub(r'\bid:([a-z_][a-z0-9_]*)(?=[,}])', convert_unquoted_item_id, nbt)
 
-        # Convert falling_block Block and Data to BlockState
-        # 1.12: {Block:double_stone_slab2,Data:9} or {Block:<id>,Data:<data>}
-        # 1.20: {BlockState:{Name:"minecraft:block_name"}}
-        # The Block: and Data: attributes are specific to falling_block entities
-        if 'Block:' in nbt:
-            # Match Block:<name>,Data:<value> pattern
-            def convert_falling_block_with_data(match):
-                block_name = match.group(1)
-                data_value = match.group(2)
-                
-                # Convert using the block lookup table
-                converted_block = self.convert_block_name(block_name, data_value)
-                
-                # Build the BlockState NBT
-                return f'BlockState:{{Name:"{converted_block}"}}'
-            
-            # Replace Block:<name>,Data:<value> with BlockState:{Name:"..."}
-            nbt = re.sub(r'Block:([^,}\]]+),Data:(\d+)', convert_falling_block_with_data, nbt)
-            
-            # Also handle Block without Data (assume Data:0)
-            if 'Block:' in nbt and 'BlockState:' not in nbt:
-                def convert_falling_block_no_data(match):
-                    block_name = match.group(1)
-                    converted_block = self.convert_block_name(block_name, '0')
-                    return f'BlockState:{{Name:"{converted_block}"}}'
-                
-                nbt = re.sub(r'Block:([^,}\]]+)', convert_falling_block_no_data, nbt)
+        # Convert falling_block Block and Data to BlockState (recursively handles Passengers arrays)
+        nbt = self._convert_falling_block_recursive(nbt)
         
         # Use structured NBT parsing for equipment conversion (1.21.10 format)
         # This uses the new extensible converter system
@@ -1019,13 +2294,19 @@ class ParameterConverters:
             nbt = self._convert_drop_chances_to_121_format(nbt)
         
         # Entity NBT may contain nested item NBT (e.g., in Inventory arrays)
-        # We need to convert color codes in nested item display properties
+        # Convert items in Inventory arrays from old format to new format
+        # Items in entity NBT should use display:{Name:...,Lore:[...]} format (not component format)
+        if 'Inventory:' in nbt or 'inventory:' in nbt:
+            nbt = self._convert_inventory_items_recursive(nbt)
+        
+        # Convert color codes in nested item display properties
         if '§' in nbt and hasattr(self, '_nbt_color_converter'):
             # Process nested item NBT for color conversion
             nbt = self._nbt_color_converter(nbt, "entity")
         
         return nbt
     
+    @log_method_call
     def _convert_equipment_to_121_format(self, nbt: str) -> str:
         """Convert ArmorItems/HandItems to equipment structure for 1.21.10"""
         import re
@@ -1528,6 +2809,7 @@ class ParameterConverters:
         
         return items
     
+    @log_method_call
     def _convert_drop_chances_to_121_format(self, nbt: str) -> str:
         """Convert HandDropChances/ArmorDropChances to drop_chances structure for 1.21.10"""
         import re
@@ -1593,9 +2875,141 @@ class ParameterConverters:
         # Block-specific NBT conversions
         return nbt
     
-    def convert_item_nbt(self, nbt: str) -> str:
-        """Convert item NBT data"""
-        # Check if NBT contains color codes and convert them
+    @log_method_call
+    def convert_item_nbt(self, nbt: str, item_id: Optional[str] = None) -> str:
+        """Convert item NBT data using structured parser for proper component format
+        
+        Args:
+            nbt: NBT data string
+            item_id: Optional item ID (e.g., 'minecraft:player_head' or 'golden_sword') to determine component naming
+        """
+        # Try structured parsing first (more reliable for components)
+        try:
+            # Parse SNBT string to structured Python object
+            nbt_dict = NBTParser.parse_snbt(nbt)
+            
+            # Convert item using structured parser
+            if isinstance(nbt_dict, dict):
+                # Handle top-level SkullOwner (not in tag) - move it into tag for processing
+                if 'SkullOwner' in nbt_dict:
+                    if 'tag' not in nbt_dict:
+                        nbt_dict['tag'] = {}
+                    if 'SkullOwner' not in nbt_dict['tag']:
+                        nbt_dict['tag']['SkullOwner'] = nbt_dict.pop('SkullOwner')
+                
+                converted_item = self._convert_item_dict_to_121_format(nbt_dict)
+                if converted_item and 'components' in converted_item and converted_item['components']:
+                    # Extract components and format for give command bracket notation
+                    # Format depends on item type:
+                    # - Namespaced items (minecraft:player_head) use minecraft:item_name and minecraft:lore
+                    # - Non-namespaced items (golden_sword) use custom_name and lore
+                    components = converted_item['components']
+                    component_parts = []
+                    
+                    # Check if item ID is namespaced to determine component naming
+                    # Use provided item_id or check converted_item
+                    check_id = item_id or converted_item.get('id', '')
+                    is_namespaced = ':' in check_id if check_id else False
+                    
+                    for key, value in components.items():
+                        # Serialize the component value
+                        import json
+                        # For give commands:
+                        # - Namespaced items: keep minecraft: prefix (minecraft:item_name, minecraft:lore)
+                        # - Non-namespaced items: strip prefix (custom_name, lore)
+                        # - minecraft:profile: always keep prefix
+                        display_key = key
+                        if key == 'minecraft:profile':
+                            display_key = 'minecraft:profile'  # Always keep prefix for profile
+                        elif is_namespaced:
+                            # Namespaced items: use minecraft:item_name and minecraft:lore
+                            if key == 'minecraft:item_name':
+                                display_key = 'minecraft:item_name'
+                            elif key == 'minecraft:lore':
+                                display_key = 'minecraft:lore'
+                            elif key == 'minecraft:custom_name':
+                                display_key = 'minecraft:item_name'  # Convert custom_name to item_name for namespaced
+                        else:
+                            # Non-namespaced items: strip prefix
+                            if key == 'minecraft:item_name':
+                                display_key = 'custom_name'
+                            elif key == 'minecraft:lore':
+                                display_key = 'lore'
+                            elif key == 'minecraft:custom_name':
+                                display_key = 'custom_name'
+                        
+                        # For minecraft:profile, use SNBT format (no quotes)
+                        # For other components, use JSON format (with quotes)
+                        if key == 'minecraft:profile':
+                            value_str = NBTSerializer.serialize_snbt(value)
+                        else:
+                            # For namespaced items (minecraft:item_name, minecraft:lore):
+                            # - item_name: keep as array (even if single element) for multi-component names
+                            # - lore: keep nested arrays [[{...}],[{...}]] (don't flatten)
+                            # For non-namespaced items (custom_name, lore):
+                            # - custom_name: if single element array, use the element directly
+                            # - lore: flatten nested arrays to flat array
+                            if is_namespaced:
+                                # Namespaced items: keep structure as-is (arrays stay arrays, nested arrays stay nested)
+                                # Don't modify value structure - keep nested arrays for lore
+                                pass
+                            else:
+                                # Non-namespaced items: flatten/convert structure
+                                if display_key == 'custom_name' and isinstance(value, list) and len(value) == 1:
+                                    value = value[0]  # Use single object instead of array
+                                elif display_key == 'lore' and isinstance(value, list):
+                                    # Flatten nested arrays: [[{...}],[{...}]] -> [{...},{...}]
+                                    flattened = []
+                                    for item in value:
+                                        if isinstance(item, list):
+                                            flattened.extend(item)
+                                        else:
+                                            flattened.append(item)
+                                    value = flattened
+                            
+                            # Use JSON format with proper key ordering (text first)
+                            def reorder_obj(obj):
+                                """Reorder object keys to put 'text' first"""
+                                if isinstance(obj, dict) and "text" in obj:
+                                    ordered = {"text": obj["text"]}
+                                    for k, v in obj.items():
+                                        if k != "text":
+                                            ordered[k] = v
+                                    return ordered
+                                return obj
+                            
+                            def deep_reorder(value):
+                                """Recursively reorder keys in nested structures"""
+                                if isinstance(value, list):
+                                    return [deep_reorder(item) for item in value]
+                                elif isinstance(value, dict):
+                                    return reorder_obj(value)
+                                return value
+                            
+                            value = deep_reorder(value)
+                            
+                            # For non-namespaced items, add spaces after colons/commas for readability
+                            # For namespaced items, keep compact format
+                            if is_namespaced:
+                                value_str = json.dumps(value, separators=(',', ':'))
+                            else:
+                                value_str = json.dumps(value, separators=(', ', ': '))
+                        # Format as key=value (using display_key without minecraft: prefix)
+                        component_parts.append(f'{display_key}={value_str}')
+                    
+                    if component_parts:
+                        return '[' + ','.join(component_parts) + ']'
+                    return ''
+            
+            # If not a dict or conversion failed, fall back to regex
+        except Exception as e:
+            # Fall back to regex-based conversion if structured parsing fails
+            import traceback
+            print(f"Warning: Structured item NBT parsing failed: {e}")
+            traceback.print_exc()
+            pass
+        
+        # Fallback: Check if NBT contains color codes and convert them
         if '§' in nbt and hasattr(self, '_nbt_color_converter'):
             nbt = self._nbt_color_converter(nbt, "item")
         return nbt
@@ -1767,6 +3181,7 @@ class NBTParser:
         if not snbt_str:
             return {}
         
+        method_logger.info("CALLED: NBTParser.parse_snbt")
         parser = NBTParser()
         
         # If it starts with {, parse as compound
@@ -2024,6 +3439,7 @@ class NBTSerializer:
     @staticmethod
     def serialize_snbt(obj: Any, indent: int = 0) -> str:
         """Convert Python dict/list/primitives to SNBT string"""
+        method_logger.info("CALLED: NBTSerializer.serialize_snbt")
         serializer = NBTSerializer()
         result = serializer._serialize_value(obj, 0)
         return result
@@ -2073,11 +3489,18 @@ class NBTSerializer:
             else:
                 key_str = key
             
-            # Pass parent key context for drop_chances formatting
-            if parent_key == 'drop_chances' or key == 'drop_chances':
-                value_str = self._serialize_value(value, indent + 1, key=key, parent_key='drop_chances')
+            # For components in entity NBT, serialize component values as JSON (quoted keys)
+            # This applies to minecraft:custom_name, minecraft:lore, etc.
+            if parent_key == 'components' or (parent_key and 'components' in parent_key):
+                # Serialize component values as JSON
+                import json
+                value_str = json.dumps(value, separators=(',', ':'))
             else:
-                value_str = self._serialize_value(value, indent + 1, key=key, parent_key=parent_key)
+                # Pass parent key context for drop_chances formatting
+                if parent_key == 'drop_chances' or key == 'drop_chances':
+                    value_str = self._serialize_value(value, indent + 1, key=key, parent_key='drop_chances')
+                else:
+                    value_str = self._serialize_value(value, indent + 1, key=key, parent_key=parent_key)
             parts.append(f'{key_str}:{value_str}')
         
         return '{' + ','.join(parts) + '}'
@@ -2124,16 +3547,32 @@ class NBTConverterRegistry:
         """
         result = nbt_dict.copy()
         
+        # Debug: Show registered converters
+        import sys
+        print(f"DEBUG NBTConverterRegistry: Registered converters = {list(self.converters.keys())}", file=sys.stderr)
+        
         # Apply converters in order
-        # Some converters check for the component themselves (like CustomName)
+        # Some converters check for the component themselves (like CustomName, Inventory)
         # Others only run if the component exists (like ArmorItems)
         for component_name, converter_func in self.converters.items():
             try:
-                result = converter_func(result, context)
+                # Always call converters that handle their own checking (CustomName, Inventory, SelectedItem)
+                # For others, only call if the component exists
+                if component_name in ['CustomName', 'Inventory', 'SelectedItem']:
+                    print(f"DEBUG NBTConverterRegistry: Calling converter for {component_name}", file=sys.stderr)
+                    result = converter_func(result, context)
+                    if component_name == 'Inventory' and 'Inventory' in result:
+                        print(f"DEBUG NBTConverterRegistry: After {component_name} conversion, Inventory = {result['Inventory']}", file=sys.stderr)
+                    if component_name == 'SelectedItem' and 'SelectedItem' in result:
+                        print(f"DEBUG NBTConverterRegistry: After {component_name} conversion, SelectedItem = {result['SelectedItem']}", file=sys.stderr)
+                elif component_name in result:
+                    result = converter_func(result, context)
             except Exception as e:
-                # Only log errors for components that should exist
-                if component_name in result:
+                # Log errors for debugging
+                if component_name in result or component_name in ['CustomName', 'Inventory']:
                     print(f"Warning: Error converting {component_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
         
         return result
 
@@ -2246,11 +3685,15 @@ class CommandConverter:
             'clone': self._convert_clone,
             'give': self._convert_give,
             'tag': self._convert_tag,
+            'project': lambda args: self._convert_project_clock_script('project', args),
+            'clock': lambda args: self._convert_project_clock_script('clock', args),
+            'script': lambda args: self._convert_project_clock_script('script', args),
         }
         
         # Set up the NBT color converter reference for ParameterConverters
         self.param_converters._nbt_color_converter = lambda nbt, context: self._convert_nbt_colors(nbt, context)
     
+    @log_method_call
     def convert_command(self, command: str) -> str:
         """Convert a single command from 1.12 to 1.20 format"""
         parsed = self.parser.parse_command(command)
@@ -2259,7 +3702,8 @@ class CommandConverter:
         
         # Handle known commands
         if command_name in self.command_handlers:
-            converted_command = self.command_handlers[command_name](args)
+            handler = self.command_handlers[command_name]
+            converted_command = handler(args)
         else:
             # For unknown commands, try to convert parameters
             converted_command = self._convert_unknown_command(command_name, args)
@@ -2270,6 +3714,7 @@ class CommandConverter:
         
         return converted_command
     
+    @log_method_call
     def _convert_summon(self, args: List[str]) -> str:
         """Convert summon command"""
         if len(args) < 1:
@@ -2292,6 +3737,7 @@ class CommandConverter:
         
         return result
     
+    @log_method_call
     def _convert_execute(self, args: List[str]) -> str:
         """Convert execute command from 1.12 to 1.20 format with proper nested chain handling"""
         if len(args) < 4:
@@ -2347,12 +3793,17 @@ class CommandConverter:
         # Handle the command that comes after detect
         if len(args) >= 11:
             # Convert the nested command
+            # Join all remaining args, preserving NBT data as a single argument
             nested_command = ' '.join(args[10:])
             converted_nested = self.convert_command(nested_command)
             result += f" run {converted_nested}"
+        elif len(args) == 10:
+            # No nested command provided, just return the execute if block part
+            pass
         
         return result
     
+    @log_method_call
     def _convert_execute_chain(self, args: List[str]) -> str:
         """Convert a complete execute chain with proper offset stacking"""
         if len(args) < 4:
@@ -2592,7 +4043,24 @@ class CommandConverter:
         # Handle NBT data parameter (args[1] if present)
         # NBT should be added as a selector parameter: @s[nbt={...}]
         if len(args) >= 2:
-            nbt = self.param_converters.convert_entity_nbt(args[1])
+            nbt = args[1]
+            # Convert Inventory to SelectedItem for testfor commands
+            # Inventory is an array: Inventory:[{...}] -> SelectedItem:{...} (remove array, use first item)
+            import re
+            if 'Inventory:' in nbt or 'inventory:' in nbt:
+                # Find Inventory: pattern and convert to SelectedItem
+                # Pattern: Inventory:[{...}] -> SelectedItem:{...}
+                inventory_pattern = re.compile(r'Inventory:\s*\[(\{[^\]]+\})\]', re.IGNORECASE)
+                match = inventory_pattern.search(nbt)
+                if match:
+                    # Extract the first item from the array
+                    first_item = match.group(1)
+                    # Replace Inventory:[{...}] with SelectedItem:{...}
+                    nbt = inventory_pattern.sub(f'SelectedItem:{first_item}', nbt)
+                    # Also handle case where Inventory: might be lowercase
+                    nbt = re.sub(r'inventory:\s*\[(\{[^\]]+\})\]', f'SelectedItem:{first_item}', nbt, flags=re.IGNORECASE)
+            
+            nbt = self.param_converters.convert_entity_nbt(nbt)
             # Insert nbt parameter into the selector
             selector = self._add_nbt_to_selector(selector, nbt)
         
@@ -2617,6 +4085,7 @@ class CommandConverter:
         
         return result
     
+    @log_method_call
     def _convert_entitydata(self, args: List[str]) -> str:
         """Convert entitydata command to execute as for multiple targets"""
         if len(args) < 2:
@@ -2657,7 +4126,16 @@ class CommandConverter:
         return result
     
     def _convert_fill(self, args: List[str]) -> str:
-        """Convert fill command"""
+        """Convert fill command
+        
+        1.12 Format:
+        - fill x1 y1 z1 x2 y2 z2 ID1 data1 [action] ID2 data2
+        - fill x1 y1 z1 x2 y2 z2 ID1 data1
+        
+        1.21 Format:
+        - fill x1 y1 z1 x2 y2 z2 block_name1 [action] block_name2
+        - fill x1 y1 z1 x2 y2 z2 block_name1
+        """
         if len(args) < 7:
             return "fill"
         
@@ -2667,14 +4145,142 @@ class CommandConverter:
         x2 = self.param_converters.convert_coordinate(args[3])
         y2 = self.param_converters.convert_coordinate(args[4])
         z2 = self.param_converters.convert_coordinate(args[5])
-        block = self.param_converters.convert_block_name(args[6], args[7] if len(args) > 7 else '0')
         
-        result = f"fill {x1} {y1} {z1} {x2} {y2} {z2} {block}"
+        # First block: ID1 (args[6]) and data1 (args[7])
+        block1_id = args[6]
+        block1_data = args[7] if len(args) > 7 else '0'
+        block1 = self.param_converters.convert_block_name(block1_id, block1_data)
         
-        # Handle additional parameters
-        if len(args) >= 8:
-            if args[7] in ['replace', 'destroy', 'keep', 'outline', 'hollow']:
-                result += f" {args[7]}"
+        result = f"fill {x1} {y1} {z1} {x2} {y2} {z2} {block1}"
+        
+        # Check if there's an action and second block
+        # Format: ID1 data1 [action] ID2 data2
+        # So if args[8] is an action keyword, then args[9] and args[10] are ID2 and data2
+        if len(args) >= 9:
+            if args[8] in ['replace', 'destroy', 'keep', 'outline', 'hollow']:
+                # args[8] is the action, args[9] and args[10] are the second block
+                action = args[8]
+                result += f" {action}"
+                
+                if len(args) >= 11:
+                    # Second block: ID2 (args[9]) and data2 (args[10])
+                    block2_id = args[9]
+                    block2_data = args[10] if len(args) > 10 else '0'
+                    block2 = self.param_converters.convert_block_name(block2_id, block2_data)
+                    result += f" {block2}"
+        
+        return result
+    
+    def _convert_project_clock_script(self, command_name: str, args: List[str]) -> str:
+        """Convert project, clock, or script commands
+        
+        Format: {x},{y},{z},[block],[data],{delay};
+        - Multiple entries separated by semicolons (;)
+        - x, y, z, block are required
+        - data is optional (defaults to 0)
+        - delay is optional
+        - Trailing text after last semicolon is preserved
+        
+        Example:
+        Input:  project 0,1,0,stained_glass,15,10;
+        Output: project 0,1,0,red_stained_glass,10;
+        """
+        if not args:
+            return command_name
+        
+        # Join all args back together to get the full parameter string
+        param_string = ' '.join(args)
+        
+        # Split by semicolons to get individual entries
+        parts = param_string.split(';')
+        
+        converted_parts = []
+        trailing_text = ""
+        
+        for i, part in enumerate(parts):
+            part = part.strip()
+            if not part:
+                continue
+            
+            # Check if this is the last part and doesn't look like coordinates,block,data,delay
+            # If it doesn't have commas or has text that doesn't match the pattern, it's trailing text
+            if i == len(parts) - 1 and (',' not in part or not any(char.isdigit() or char == '-' for char in part.split(',')[0] if part.split(','))):
+                # This might be trailing text - check if previous parts were valid
+                if converted_parts:
+                    trailing_text = part
+                    break
+            
+            # Parse: x,y,z,block,data,delay
+            # x, y, z, block are required; data and delay are optional
+            components = [c.strip() for c in part.split(',')]
+            
+            if len(components) < 4:
+                # Not enough components, might be trailing text
+                if i == len(parts) - 1 and converted_parts:
+                    trailing_text = part
+                    break
+                # Otherwise, skip invalid entries
+                continue
+            
+            x = components[0]
+            y = components[1]
+            z = components[2]
+            block = components[3].lower()  # Convert to lowercase for lookup
+            
+            # Determine data and delay
+            # Format: x,y,z,block,data,delay
+            # - 4 components: x, y, z, block (data=0, no delay)
+            # - 5 components: x, y, z, block, delay (data=0)
+            # - 6 components: x, y, z, block, data, delay
+            data = '0'  # Default data
+            delay = None
+            
+            if len(components) == 4:
+                # x, y, z, block only (data=0, no delay)
+                data = '0'
+                delay = None
+            elif len(components) == 5:
+                # x, y, z, block, delay (data=0)
+                data = '0'
+                delay = components[4]
+            elif len(components) >= 6:
+                # x, y, z, block, data, delay
+                data = components[4]
+                delay = components[5]
+                # Check if there's extra content after delay (trailing text)
+                if len(components) > 6 and i == len(parts) - 1:
+                    trailing_text = ','.join(components[6:])
+                    break
+            
+            # Convert block name using legacy.json
+            # First, look up block name -> ID in ID_Lookups.csv
+            # Then use legacy.json with id:data format
+            converted_block = self.param_converters.convert_block_name_legacy(block, data)
+            # Remove minecraft: prefix if present (these commands might not use it)
+            if converted_block.startswith('minecraft:'):
+                converted_block = converted_block[10:]
+            
+            # Reconstruct: x,y,z,converted_block,delay (if delay exists)
+            if delay is not None:
+                converted_parts.append(f"{x},{y},{z},{converted_block},{delay}")
+            else:
+                converted_parts.append(f"{x},{y},{z},{converted_block}")
+        
+        # Reconstruct the command
+        result = f"{command_name} {';'.join(converted_parts)}"
+        if trailing_text:
+            # Check if there was a space after the last semicolon in the original
+            last_semicolon_idx = param_string.rfind(';')
+            if last_semicolon_idx >= 0 and last_semicolon_idx + 1 < len(param_string):
+                char_after_semicolon = param_string[last_semicolon_idx + 1]
+                if char_after_semicolon == ' ':
+                    result += f"; {trailing_text}"
+                else:
+                    result += f";{trailing_text}"
+            else:
+                result += f";{trailing_text}"
+        elif converted_parts:
+            result += ";"  # Add semicolon if there are parts but no trailing text
         
         return result
     
@@ -2855,37 +4461,63 @@ class CommandConverter:
                 pass
         
         # Special handling for blockcrack and blockdust particles
+        # 1.12: particle blockcrack <x> <y> <z> <dx> <dy> <dz> <speed> [count] [mode] [targeter] [encoded_block_id]
+        # 1.21: particle block{block_state:"[block name]"} <x> <y> <z> <dx> <dy> <dz> <speed> [count] [mode] [targeter]
+        # Formula: encoded_block_id = block_id + (block_data * 4096)
         if args[0] in ["blockcrack", "blockdust"] and len(args) >= 8:
             try:
+                # The last argument is the encoded block ID
                 block_numeric = int(args[-1])
-                block_name = self.param_converters._get_block_name_from_numeric(block_numeric)
-                result = f"particle block {block_name}"
-                for i in range(1, 7):
-                    result += f" {args[i]}"
-                # Take absolute value of speed (args[6])
-                try:
-                    speed = str(abs(float(args[6])))
-                    result = result.rsplit(' ', 1)[0] + f" {speed}"
-                except Exception:
-                    pass
-                # Add count (args[7])
-                result += f" {args[7]}"
-                # Add optional mode and target selector (args[8] to len(args)-2)
-                if len(args) > 8:
-                    # If there are more than one extra argument, the last one before block id might be a selector
-                    extras = args[8:-1]
-                    if extras:
-                        # If the last extra is a selector, convert it
-                        if extras[-1].startswith('@'):
-                            for extra in extras[:-1]:
-                                result += f" {extra}"
-                            converted_selector = self.param_converters.convert_selector(extras[-1])
+                
+                # Reverse engineer: id = encoded % 4096, data = encoded // 4096
+                block_id = block_numeric % 4096
+                block_data = block_numeric // 4096
+                
+                # Look up block name using ID_Lookups.csv (normal conversion)
+                block_name = self.param_converters.convert_block_name(str(block_id), str(block_data))
+                
+                # Remove minecraft: prefix if present (block_state should be just the block name)
+                if block_name.startswith('minecraft:'):
+                    block_name = block_name[10:]
+                
+                # Format: particle block{block_state:"[block name]"} ...
+                result = f'particle block{{block_state:"{block_name}"}}'
+                
+                # Add coordinates (args[1] through args[3])
+                result += f" {args[1]} {args[2]} {args[3]}"
+                
+                # Add spread (args[4] through args[6])
+                result += f" {args[4]} {args[5]} {args[6]}"
+                
+                # Take absolute value of speed (args[6] is dz, args[7] should be speed)
+                # Actually, looking at the format: particle blockcrack <x> <y> <z> <dx> <dy> <dz> <speed> [count] [mode] [targeter] [encoded_block_id]
+                # So args[7] is speed, args[8] is count, etc.
+                if len(args) >= 8:
+                    try:
+                        speed = str(abs(float(args[7])))
+                        result += f" {speed}"
+                    except (ValueError, IndexError):
+                        result += f" {args[7]}" if len(args) > 7 else ""
+                
+                # Add count if present (args[8])
+                if len(args) >= 9:
+                    result += f" {args[8]}"
+                
+                # Add optional mode and target selector (args[9] to len(args)-2, excluding the last encoded_block_id)
+                if len(args) > 9:
+                    # Skip the last argument (encoded_block_id) and process the rest
+                    extras = args[9:-1]
+                    for extra in extras:
+                        # Convert selector if it's a selector
+                        if extra.startswith('@'):
+                            converted_selector = self.param_converters.convert_selector(extra)
                             result += f" {converted_selector}"
                         else:
-                            for extra in extras:
-                                result += f" {extra}"
+                            result += f" {extra}"
+                
                 return result
-            except (ValueError, IndexError):
+            except (ValueError, IndexError) as e:
+                # If conversion fails, fall through to standard particle conversion
                 pass
         
         # Standard particle conversion (for particles with same parameter structure)
@@ -3023,7 +4655,17 @@ class CommandConverter:
                     item_name = item[:brace_pos]
                     nbt_data = item[brace_pos:]
                 
+                # Convert NBT - ensure it uses bracket notation for component format
                 nbt = self.param_converters.convert_item_nbt(nbt_data)
+                
+                # If converted NBT has component format but is wrapped in braces, convert to brackets
+                if nbt.startswith('{') and nbt.endswith('}') and ('custom_name=' in nbt or 'lore=' in nbt):
+                    # Extract content and wrap in brackets
+                    content = nbt[1:-1]
+                    # Only convert if it's component-style (not traditional NBT like id, Count, etc.)
+                    if not any(key + ':' in content for key in ['id', 'Count', 'Damage', 'tag', 'Slot']):
+                        nbt = '[' + content + ']'
+                
                 result += f" {item_name}{nbt}"
                 
                 # Check for count after the item
@@ -3034,7 +4676,7 @@ class CommandConverter:
             
             # No inline NBT, proceed with traditional parsing
             # 1.12 format: clear <player> <item> <data> <maxCount> <nbt>
-            # 1.20 format: clear <player> <item>{nbt} <maxCount>
+            # 1.21 format: clear <player> <item>[nbt] <maxCount> (component format uses brackets)
             
             data_value = '0'
             max_count = None
@@ -3063,16 +4705,31 @@ class CommandConverter:
             if not converted_item.startswith('minecraft:') and ':' not in converted_item:
                 converted_item = f"minecraft:{converted_item}"
             
-            # Build the result in 1.20 format
+            # Build the result in 1.21 format
+            # NOTE: For clear command, items use bracket notation [custom_name=...,lore=[...]] for component format
+            # Same as give command - both use brackets for component format
             if nbt_data:
+                # Normal NBT conversion (handles display:{Name:...,Lore:[...]} format)
                 converted_nbt = self.param_converters.convert_item_nbt(nbt_data)
                 
-                # Add Damage attribute if data_value is present and not 0
+                # If converted NBT has component format but is wrapped in braces, convert to brackets
+                if converted_nbt.startswith('{') and converted_nbt.endswith('}') and ('custom_name=' in converted_nbt or 'lore=' in converted_nbt):
+                    # Extract content and wrap in brackets
+                    content = converted_nbt[1:-1]
+                    # Only convert if it's component-style (not traditional NBT like id, Count, etc.)
+                    if not any(key + ':' in content for key in ['id', 'Count', 'Damage', 'tag', 'Slot']):
+                        converted_nbt = '[' + content + ']'
+                
+                # Add damage attribute if data_value is present and not 0
                 if data_value and data_value != '0':
-                    if converted_nbt.endswith('}'):
+                    if converted_nbt.endswith(']'):
+                        # Insert damage before closing bracket
+                        converted_nbt = converted_nbt[:-1] + f',damage={data_value}' + ']'
+                    elif converted_nbt.endswith('}'):
+                        # Insert damage before closing brace
                         converted_nbt = converted_nbt[:-1] + f',Damage:{data_value}' + '}'
                     else:
-                        converted_nbt = f'{converted_nbt},Damage:{data_value}'
+                        converted_nbt = f'{converted_nbt},damage={data_value}'
                 
                 result += f" {converted_item}{converted_nbt}"
             elif data_value and data_value != '0':
@@ -3114,6 +4771,7 @@ class CommandConverter:
         
         return result
     
+    @log_method_call
     def _convert_give(self, args: List[str]) -> str:
         """Convert give command"""
         if len(args) < 2:
@@ -3184,11 +4842,10 @@ class CommandConverter:
                 item_name = item[:brace_pos]
                 nbt_data = item[brace_pos:]
             
-            # Add minecraft: namespace prefix if missing
-            if ':' not in item_name:
-                item_name = f"minecraft:{item_name}"
+            # Don't add minecraft: prefix for give commands (1.21 format doesn't require it)
+            # Item names are used as-is
             
-            nbt = self.param_converters.convert_item_nbt(nbt_data)
+            nbt = self.param_converters.convert_item_nbt(nbt_data, item_id=item_name)
             
             # In Minecraft 1.21, item data components use brackets [] instead of braces {}
             # Convert outer braces to brackets if present
@@ -3228,37 +4885,54 @@ class CommandConverter:
         # In Minecraft 1.21, item data components use brackets [] instead of braces {}
         result = f"give {target}"
         
-        # Add minecraft: namespace prefix to item name if missing
-        if ':' not in item:
-            item = f"minecraft:{item}"
+        # Handle skull conversion: skull with data_value -> specific head type
+        # 1.12: give <player> skull 1 3 -> 1.21: give <player> player_head 1
+        skull_map = {
+            '0': 'minecraft:skeleton_skull',
+            '1': 'minecraft:wither_skeleton_skull',
+            '2': 'minecraft:zombie_head',
+            '3': 'minecraft:player_head',
+            '4': 'minecraft:creeper_head',
+            '5': 'minecraft:dragon_head'
+        }
+        
+        # Check if item is skull and data_value is present
+        if (item == 'skull' or item == 'minecraft:skull') and data_value:
+            new_item = skull_map.get(data_value)
+            if new_item:
+                item = new_item
+                data_value = None  # Don't add damage for skulls (data_value was used for head type)
+        
+        # Don't add minecraft: prefix for give commands (1.21 format doesn't require it)
+        # Item names are used as-is
         
         # Handle NBT data and data_value (Damage attribute)
         if nbt_data:
-            # Convert the NBT
-            nbt = self.param_converters.convert_item_nbt(nbt_data)
+            # Convert the NBT - pass item name to determine component naming
+            nbt = self.param_converters.convert_item_nbt(nbt_data, item_id=item)
             
             # Convert outer braces to brackets for 1.21 item components (do this before adding Damage)
             if nbt.startswith('{') and nbt.endswith('}'):
                 nbt = '[' + nbt[1:-1] + ']'
             
-            # Add Damage attribute if data_value is present
-            # 1.12 data values become Damage NBT in 1.21
+            # Add damage attribute if data_value is present
+            # 1.12 data values become damage NBT in 1.21 (lowercase, equals sign)
             if data_value and data_value != '0':
-                # Insert Damage before the closing bracket
-                # NBT format: [display:{...},Damage:23]
+                # Insert damage before the closing bracket
+                # NBT format: [display:{...},damage=23]
                 if nbt.endswith(']'):
-                    nbt = nbt[:-1] + f',Damage:{data_value}' + ']'
+                    nbt = nbt[:-1] + f',damage={data_value}' + ']'
                 elif nbt.endswith('}'):
                     # Still braces (shouldn't happen after conversion, but handle it)
-                    nbt = nbt[:-1] + f',Damage:{data_value}' + '}'
+                    nbt = nbt[:-1] + f',damage={data_value}' + '}'
                 else:
-                    nbt = f'{nbt},Damage:{data_value}'
+                    nbt = f'{nbt},damage={data_value}'
             
             result += f" {item}{nbt}"
         elif data_value and data_value != '0':
             # No NBT data provided, but we have a data value
-            # Create NBT with just Damage (use brackets for 1.21)
-            result += f" {item}[Damage:{data_value}]"
+            # Create NBT with just damage (use brackets for 1.21)
+            result += f" {item}[damage={data_value}]"
         else:
             result += f" {item}"
         
@@ -3636,28 +5310,55 @@ class CommandConverter:
                 components = []
                 
                 # Extract Name if present (handle both quoted formats)
-                name_match = re.search(r'Name:["\']([^"\']*)["\']', display_content)
-                if name_match:
-                    name_value = name_match.group(1)
-                    # Remove any existing JSON escaping
-                    name_value = name_value.replace('\\"', '"').replace("\\'", "'")
-                    # If it's already JSON, parse it; otherwise convert
-                    if name_value.startswith('{') or name_value.startswith('['):
-                        # Already JSON, just wrap in array
-                        components.append(f"custom_name=[{name_value}]")
-                    else:
-                        # Convert to 1.21 format: custom_name=[{...}]
-                        json_obj = self._convert_plain_text_to_json(name_value)
-                        components.append(f"custom_name=[{json_obj}]")
+                # Use brace matching to find the full quoted string (handles apostrophes)
+                name_pattern = re.compile(r'Name:["\']')
+                name_matches = list(name_pattern.finditer(display_content))
+                if name_matches:
+                    name_match = name_matches[0]
+                    quote_start = name_match.end() - 1  # Position of opening quote
+                    quote_char = display_content[quote_start]
+                    
+                    # Find the closing quote (handle escaped quotes)
+                    quote_end = quote_start + 1
+                    while quote_end < len(display_content):
+                        if display_content[quote_end] == '\\':
+                            quote_end += 2  # Skip escaped character
+                            continue
+                        if display_content[quote_end] == quote_char:
+                            break
+                        quote_end += 1
+                    
+                    if quote_end < len(display_content):
+                        name_value = display_content[name_match.end():quote_end]
+                        # Remove any existing JSON escaping
+                        name_value = name_value.replace('\\"', '"').replace("\\'", "'")
+                        # If it's already JSON, parse it; otherwise convert
+                        if name_value.startswith('{') or name_value.startswith('['):
+                            # Already JSON, use as single object (not array)
+                            components.append(f"custom_name={name_value}")
+                        else:
+                            # Convert to 1.21 format: custom_name={...} (single object, not array)
+                            json_obj = self._convert_plain_text_to_json(name_value)
+                            # json_obj is already a valid JSON string, use it directly
+                            components.append(f"custom_name={json_obj}")
                 
-                # Extract Lore if present
-                lore_match = re.search(r'Lore:\[(.*?)\]', display_content, re.DOTALL)
-                if lore_match:
-                    lore_content = lore_match.group(1)
-                    # Convert lore to 1.21 format: lore=[[...],[...]]
-                    converted_lore = self._convert_lore_to_121_format(lore_content)
-                    if converted_lore:
-                        components.append(f"lore=[{converted_lore}]")
+                # Extract Lore if present - use bracket matching for robustness
+                lore_pattern = re.compile(r'Lore:\[')
+                lore_matches = list(lore_pattern.finditer(display_content))
+                if lore_matches:
+                    lore_match = lore_matches[0]
+                    lore_start = lore_match.end() - 1  # Position of opening bracket
+                    lore_content_start = lore_match.end()  # Position after "Lore:["
+                    
+                    # Find matching closing bracket (handles nested arrays)
+                    closing_bracket_pos = self._find_matching_bracket(display_content, lore_start)
+                    if closing_bracket_pos != -1:
+                        lore_content = display_content[lore_content_start:closing_bracket_pos]
+                        # Convert lore to 1.21 format: lore=[{...},{...}] (flat array)
+                        converted_lore = self._convert_lore_to_121_format(lore_content)
+                        if converted_lore:
+                            # converted_lore is already a JSON array string, so use it directly
+                            components.append(f"lore={converted_lore}")
                 
                 # Replace display:{...} with component format (remove "display:" prefix)
                 if components:
@@ -3696,7 +5397,9 @@ class CommandConverter:
                     if '§' in name_value or True:  # Always convert to JSON format in 1.21
                         json_text = self._convert_plain_text_to_json(name_value)
                         # Use single quotes for outer string to avoid escaping inner quotes (SNBT format)
-                        return f"Name:'{json_text}'"
+                        # Escape quotes for double-quoted string (required for compatibility in selector parameters)
+                        json_text_escaped = json_text.replace('\\', r'\\').replace('"', r'\"')
+                        return f'Name:"{json_text_escaped}"'
                     return name_match.group(0)
                 
                 converted_content = re.sub(r'Name:"([^"]*)"', convert_name, display_content)
@@ -3718,8 +5421,9 @@ class CommandConverter:
                     # Extract lore array content
                     lore_array_content = converted_content[lore_content_start:closing_bracket_pos]
                     
-                    # Convert colors in lore
-                    converted_lore = self._convert_lore_colors(lore_array_content)
+                    # Convert colors in lore - for entity context, use escaped JSON strings
+                    # display.Lore is a STRING array, so each element must be an escaped JSON string
+                    converted_lore = self._convert_lore_array_to_json_strings(lore_array_content)
                     
                     # Replace the lore array
                     converted_content = converted_content[:lore_content_start] + converted_lore + converted_content[closing_bracket_pos:]
@@ -3794,6 +5498,7 @@ class CommandConverter:
         
         return result
     
+    @log_method_call
     def _convert_custom_name_value(self, prop: str) -> str:
         """Extract and convert just the name value (for use in display:{})"""
         import re
@@ -3819,6 +5524,7 @@ class CommandConverter:
         
         return f'"{json_text_escaped}"'
     
+    @log_method_call
     def _convert_custom_name_property(self, prop: str, context: str = "item") -> str:
         """Convert custom_name property to Minecraft 1.20+ format with apostrophe wrapping"""
         import re
@@ -3846,6 +5552,7 @@ class CommandConverter:
         # Entity format: CustomName:"{...}"
         return f'CustomName:"{json_text_escaped}"'
     
+    @log_method_call
     def _convert_lore_value(self, prop: str) -> str:
         """Extract and convert just the lore value (for use in display:{})"""
         import re
@@ -3861,6 +5568,7 @@ class CommandConverter:
         
         return f"[{converted_lore}]"
     
+    @log_method_call
     def _convert_lore_property(self, prop: str, context: str = "item") -> str:
         """Convert lore property to Minecraft 1.20+ format"""
         lore_value = self._convert_lore_value(prop)
@@ -3868,8 +5576,9 @@ class CommandConverter:
         return f"display:{{Lore:{lore_value}}}"
     
     def _convert_lore_to_121_format(self, lore_text: str) -> str:
-        """Convert lore text to Minecraft 1.21 component format: [[{...}],[{...}]]"""
+        """Convert lore text to Minecraft 1.21 component format: [{...},{...}] (flat array)"""
         import re
+        import json
         
         # Split by commas, but be careful about nested structures and quoted strings
         lines = []
@@ -3904,7 +5613,7 @@ class CommandConverter:
         if current_line.strip():
             lines.append(current_line.strip())
         
-        converted_lines = []
+        converted_components = []
         
         for line in lines:
             # Remove quotes if present
@@ -3912,21 +5621,27 @@ class CommandConverter:
             
             # Handle empty lines
             if not line:
-                converted_lines.append('[{"text":"","italic":false}]')
+                converted_components.append({"text": "", "italic": False})
                 continue
             
-            # Convert to 1.21 format - each lore line is an array of components
+            # Convert to 1.21 format - parse the JSON to get components
             json_text = self._convert_plain_text_to_json(line)
             
-            # If it's already an array (multiple components), use it directly
-            # If it's a single object, wrap it in an array
-            if json_text.startswith('['):
-                converted_lines.append(json_text)
-            else:
-                converted_lines.append(f'[{json_text}]')
+            # Parse the JSON to get the component(s)
+            try:
+                parsed = json.loads(json_text)
+                if isinstance(parsed, list):
+                    # Multiple components - add each one to the flat array
+                    converted_components.extend(parsed)
+                else:
+                    # Single component - add it to the flat array
+                    converted_components.append(parsed)
+            except:
+                # Fallback if JSON parsing fails
+                converted_components.append({"text": line, "italic": False})
         
-        # Return as comma-separated array of arrays
-        return ','.join(converted_lines)
+        # Return as a flat array of components (not nested arrays)
+        return json.dumps(converted_components)
     
     def _convert_lore_colors(self, lore_text: str) -> str:
         """Convert colors in lore text to Minecraft 1.20+ format (legacy - kept for compatibility)"""
@@ -4009,3 +5724,107 @@ class CommandConverter:
                 result += f" {arg}"
         
         return result
+
+
+def run_test_commands():
+    """Run hardcoded test commands and compare with expected results"""
+    import sys
+    import io
+    
+    # Fix Unicode output for Windows
+    if sys.platform == 'win32':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    
+    # Hardcoded test cases: (original, expected)
+    # Note: Fixed encoding issue - replaced Â§ with §
+    test_cases = [
+        (
+            'give @p[m=2,r=150,tag=waygate.activate8] minecraft:skull 1 3 {display:{Name:"§eGate Stone§7",Lore:["§7Charges: §e7§7/§e8","","§6Swap Item","§7Use near a §eWaygate §7to begin","§7a teleportation sequence.","","§7§oA smooth gem with magic sigils","§7§oetched into it. Used to travel","§7§obetween §e§oWaygates§7§o.","","§9Legendary Item"]},SkullOwner:{Id:"18d47163-dfe8-4159-95a3-d396c5022840",Properties:{textures:[{Value:"eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvYjliMWZiYjY4NTdkYWYyMWMxMjljYmExMzQ4ZWNjNWQ0ZWJhYzBjYjc4YThiMTMyYTkxODE2YWM0MzgwODhmMiJ9fX0="}]}}}',
+            'give @p[gamemode=adventure,tag=waygate.activate8,distance=..150] minecraft:player_head[minecraft:item_name=[{"text":"Gate Stone","color":"yellow","italic":false},{"text":"","color":"gray","italic":false}],minecraft:lore=[[{"text":"Charges: ","color":"gray","italic":false},{"text":"7","color":"yellow","italic":false},{"text":"/","color":"gray","italic":false},{"text":"8","color":"yellow","italic":false}],[{"text":"","italic":false}],[{"text":"Swap Item","color":"gold","italic":false}],[{"text":"Use near a ","color":"gray","italic":false},{"text":"Waygate ","color":"yellow","italic":false},{"text":"to begin","color":"gray","italic":false}],[{"text":"a teleportation sequence.","color":"gray","italic":false}],[{"text":"","italic":false}],[{"text":"A smooth gem with magic sigils","color":"gray","italic":true}],[{"text":"etched into it. Used to travel","color":"gray","italic":true}],[{"text":"between ","color":"gray","italic":true},{"text":"Waygates","color":"yellow","italic":true},{"text":".","color":"gray","italic":true}],[{"text":"","italic":false}],[{"text":"Legendary Item","color":"blue","italic":false}]],minecraft:profile={properties:[{name:"textures",value:"eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHA6Ly90ZXh0dXJlcy5taW5lY3JhZnQubmV0L3RleHR1cmUvYjliMWZiYjY4NTdkYWYyMWMxMjljYmExMzQ4ZWNjNWQ0ZWJhYzBjYjc4YThiMTMyYTkxODE2YWM0MzgwODhmMiJ9fX0="}]}] 1'
+        ),
+        (
+            'give @p golden_sword 1 23 {display:{Name:"§eUsurper\'s Scepter",Lore:["§7Radiates a strange aura that grants","§7access to unauthorized domains.","","§9Dungeon Item","§r§6Soulbound"]}}',
+            'give @p golden_sword[custom_name={"text": "Usurper\'s Scepter", "color": "yellow", "italic": false},lore=[{"text": "Radiates a strange aura that grants", "color": "gray", "italic": false}, {"text": "access to unauthorized domains.", "color": "gray", "italic": false}, {"text": "", "italic": false}, {"text": "Dungeon Item", "color": "blue", "italic": false}, {"text": "Soulbound", "color": "gold", "italic": false}],damage=23] 1'
+        ),
+        (
+            'scoreboard players tag @a[m=2,tag=!dcsHasSword,r=300] add dcsHasSword {Inventory:[{id:"minecraft:golden_sword",tag:{display:{Name:"§eUsurper\'s Scepter",Lore:["§7Radiates a strange aura that grants","§7access to unauthorized domains.","","§9Dungeon Item","§r§6Soulbound"]}}}]}',
+            'tag @a[gamemode=adventure,tag=!dcsHasSword,distance=..300,nbt={Inventory:[{id:"minecraft:golden_sword",components:{"minecraft:custom_name":{"color":"yellow","italic":false,"text":"Usurper\'s Scepter"},"minecraft:lore":[{"color":"gray","italic":false,"text":"Radiates a strange aura that grants"},{"color":"gray","italic":false,"text":"access to unauthorized domains."},{"text":"","italic":false},{"color":"blue","italic":false,"text":"Dungeon Item"},{"color":"gold","italic":false,"text":"Soulbound"}]}}]}] add dcsHasSword'
+        ),
+        (
+            'execute @a[m=2,r=100] ~ ~ ~ detect ~ 173 ~ stained_hardened_clay 13 testfor @s {SelectedItem:{id:"minecraft:golden_sword",tag:{display:{Name:"§eUsurper\'s Scepter",Lore:["§7Radiates a strange aura that grants","§7access to unauthorized domains.","","§9Dungeon Item","§r§6Soulbound"]}}}}',
+            'execute as @a[gamemode=adventure,distance=..100] at @s positioned ~ ~ ~ if block ~ 173 ~ minecraft:green_terracotta run execute if entity @s[nbt={SelectedItem:{id:"minecraft:golden_sword",components:{"minecraft:custom_name":{"color":"yellow","italic":false,"text":"Usurper\'s Scepter"},"minecraft:lore":[{"color":"gray","italic":false,"text":"Radiates a strange aura that grants"},{"color":"gray","italic":false,"text":"access to unauthorized domains."},{"color":"blue","italic":false,"text":"Dungeon Item"},{"color":"gold","italic":false,"text":"Soulbound"}]},count:1}}]'
+        ),
+    ]
+    
+    lookups = LookupTables(silent=True)
+    converter = CommandConverter(lookups)
+    
+    passed = 0
+    failed = 0
+    
+    for i, (original, expected) in enumerate(test_cases, 1):
+        print("=" * 80)
+        print(f"TEST CASE {i}")
+        print("=" * 80)
+        print()
+        print("ORIGINAL (1.12):")
+        print(original)
+        print()
+        
+        try:
+            converted = converter.convert_command(original)
+            print("CONVERTED (1.21.10):")
+            print(converted)
+            print()
+            print("EXPECTED (1.21.10):")
+            print(expected)
+            print()
+            
+            # Compare
+            if converted == expected:
+                print("[PASS] Output matches expected")
+                passed += 1
+            else:
+                print("[FAIL] Output does not match expected")
+                failed += 1
+                print()
+                print("DIFFERENCES:")
+                # Find differences
+                if len(converted) != len(expected):
+                    print(f"  - Length: converted={len(converted)}, expected={len(expected)}")
+                
+                # Compare character by character to find first difference
+                min_len = min(len(converted), len(expected))
+                for j in range(min_len):
+                    if converted[j] != expected[j]:
+                        start = max(0, j - 50)
+                        end = min(len(converted), j + 50)
+                        print(f"  - First difference at position {j}:")
+                        print(f"    Converted: ...{converted[start:end]}...")
+                        print(f"    Expected:  ...{expected[start:end]}...")
+                        break
+                else:
+                    if len(converted) > len(expected):
+                        print(f"  - Converted is longer by {len(converted) - len(expected)} characters")
+                        print(f"    Extra: {converted[len(expected):]}")
+                    else:
+                        print(f"  - Expected is longer by {len(expected) - len(converted)} characters")
+                        print(f"    Missing: {expected[len(converted):]}")
+            
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+            failed += 1
+        
+        print()
+        print()
+    
+    print("=" * 80)
+    print(f"SUMMARY: {passed} passed, {failed} failed out of {len(test_cases)} tests")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    # Run tests if script is executed directly
+    run_test_commands()
